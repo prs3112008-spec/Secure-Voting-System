@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const verifyToken = require('../middleware/verifyToken');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -13,6 +14,10 @@ const pool = new Pool({
 router.post('/register', async (req, res) => {
     try {
         const { full_name, email, mobile_no, password } = req.body;
+        if (!full_name || !email || !mobile_no || !password) {
+            return res.status(400).json({ error: 'All fields are required.' });
+        }
+
         const userExists = await pool.query('SELECT * FROM users WHERE email = $1 OR mobile_no = $2', [email, mobile_no]);
         if (userExists.rows.length > 0) return res.status(400).json({ error: 'User already exists.' });
 
@@ -20,11 +25,15 @@ router.post('/register', async (req, res) => {
         const password_hash = await bcrypt.hash(password, salt);
 
         const newUser = await pool.query(
-            'INSERT INTO users (full_name, email, mobile_no, password_hash) VALUES ($1, $2, $3, $4) RETURNING user_id, full_name, email, role',
+            "INSERT INTO users (full_name, email, mobile_no, password_hash, role, is_approved) VALUES ($1, $2, $3, $4, 'voter', FALSE) RETURNING user_id, full_name, email, role, is_approved",
             [full_name, email, mobile_no, password_hash]
         );
-        res.status(201).json({ message: 'User registered!', user: newUser.rows[0] });
+        res.status(201).json({
+            message: 'Registration successful! Wait for admin approval.',
+            user: newUser.rows[0]
+        });
     } catch (err) {
+        console.error('REGISTER ERROR:', err.message);
         res.status(500).json({ error: 'Server error.' });
     }
 });
@@ -49,6 +58,42 @@ router.post('/login', async (req, res) => {
         res.json({ message: 'Login successful!', token: token, role: user.rows[0].role });
     } catch (err) {
         res.status(500).json({ error: 'Server error during login.' });
+    }
+});
+
+router.post('/register-face', verifyToken, async (req, res) => {
+    const face_embedding = req.body && req.body.face_embedding;
+    if (!Array.isArray(face_embedding) || face_embedding.length !== 192 ||
+        !face_embedding.every(value => typeof value === 'number' && Number.isFinite(value))) {
+        return res.status(400).json({ error: 'face_embedding must be an array of 192 finite numbers.' });
+    }
+
+    try {
+        const result = await pool.query(
+            'UPDATE users SET face_embedding = $1 WHERE user_id = $2',
+            [JSON.stringify(face_embedding), req.user.user_id]
+        );
+        if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+
+        res.status(200).json({ message: 'Face registered successfully!' });
+    } catch (err) {
+        console.error('Error registering face:', err.message);
+        res.status(500).json({ error: 'Server error registering face.' });
+    }
+});
+
+router.get('/face-embedding', verifyToken, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT face_embedding FROM users WHERE user_id = $1',
+            [req.user.user_id]
+        );
+        if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+
+        res.status(200).json({ face_embedding: result.rows[0].face_embedding });
+    } catch (err) {
+        console.error('Error retrieving face embedding:', err.message);
+        res.status(500).json({ error: 'Server error retrieving face embedding.' });
     }
 });
 
