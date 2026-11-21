@@ -49,6 +49,10 @@ router.post('/login', async (req, res) => {
         const validPassword = await bcrypt.compare(password, user.rows[0].password_hash);
         if (!validPassword) return res.status(401).json({ error: 'Invalid email or password.' });
 
+        if (user.rows[0].role !== 'admin' && !user.rows[0].is_approved) {
+            return res.status(403).json({ error: 'Your account is pending Admin approval. Please wait for verification.' });
+        }
+
         const token = jwt.sign(
             { user_id: user.rows[0].user_id, role: user.rows[0].role },
             process.env.JWT_SECRET,
