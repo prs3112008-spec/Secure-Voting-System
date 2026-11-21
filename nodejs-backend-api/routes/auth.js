@@ -68,17 +68,64 @@ router.post('/register-face', verifyToken, async (req, res) => {
         return res.status(400).json({ error: 'face_embedding must be an array of 192 finite numbers.' });
     }
 
+    let client;
+    let transactionStarted = false;
     try {
-        const result = await pool.query(
+        client = await pool.connect();
+        await client.query('BEGIN');
+        transactionStarted = true;
+        await client.query('SELECT pg_advisory_xact_lock(1247112201)');
+
+        const existingUsers = await client.query(
+            'SELECT face_embedding FROM users WHERE user_id != $1 AND face_embedding IS NOT NULL',
+            [req.user.user_id]
+        );
+        for (const row of existingUsers.rows) {
+            let storedEmbedding = row.face_embedding;
+            if (typeof storedEmbedding === 'string') {
+                storedEmbedding = JSON.parse(storedEmbedding);
+            }
+            if (!Array.isArray(storedEmbedding) || storedEmbedding.length !== face_embedding.length ||
+                !storedEmbedding.every(value => typeof value === 'number' && Number.isFinite(value))) {
+                throw new Error('Stored face embedding is invalid.');
+            }
+
+            const squaredDistance = face_embedding.reduce((sum, value, index) => {
+                const difference = value - storedEmbedding[index];
+                return sum + difference * difference;
+            }, 0);
+            if (Math.sqrt(squaredDistance) < 0.90) {
+                await client.query('ROLLBACK');
+                transactionStarted = false;
+                return res.status(409).json({ error: 'This face is already registered to another voter account.' });
+            }
+        }
+
+        const result = await client.query(
             'UPDATE users SET face_embedding = $1 WHERE user_id = $2',
             [JSON.stringify(face_embedding), req.user.user_id]
         );
-        if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
+        if (result.rowCount === 0) {
+            await client.query('ROLLBACK');
+            transactionStarted = false;
+            return res.status(404).json({ error: 'User not found.' });
+        }
 
+        await client.query('COMMIT');
+        transactionStarted = false;
         res.status(200).json({ message: 'Face registered successfully!' });
     } catch (err) {
+        if (client && transactionStarted) {
+            try {
+                await client.query('ROLLBACK');
+            } catch (rollbackErr) {
+                console.error('Error rolling back face registration:', rollbackErr.message);
+            }
+        }
         console.error('Error registering face:', err.message);
         res.status(500).json({ error: 'Server error registering face.' });
+    } finally {
+        if (client) client.release();
     }
 });
 
