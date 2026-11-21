@@ -28,6 +28,14 @@ router.post('/cast', verifyToken, async (req, res) => {
             return res.status(404).json({ error: 'Poll not found.' });
         }
 
+        const candidateCheck = await pool.query(
+            'SELECT 1 FROM candidates WHERE candidate_id = $1 AND poll_id = $2',
+            [candidate_id, poll_id]
+        );
+        if (candidateCheck.rows.length === 0) {
+            return res.status(400).json({ error: 'Candidate does not belong to this poll.' });
+        }
+
         const poll = pollCheck.rows[0];
         const now = new Date();
         const start = new Date(poll.start_time);
