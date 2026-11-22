@@ -120,7 +120,7 @@ router.post('/cast', castVoteRateLimit, verifyToken, async (req, res) => {
 router.get('/verify/:hash', async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT * FROM votes WHERE current_hash = $1',
+            'SELECT vote_id, poll_id, candidate_id, voter_id, previous_hash, current_hash, vote_timestamp FROM votes WHERE current_hash = $1',
             [req.params.hash]
         );
 
@@ -132,7 +132,6 @@ router.get('/verify/:hash', async (req, res) => {
         }
 
         const vote = result.rows[0];
-        const recordedAt = vote.timestamp || vote.created_at || vote.voted_at || vote.cast_at || null;
         const previousVote = await pool.query(
             'SELECT * FROM votes WHERE vote_id < $1 ORDER BY vote_id DESC LIMIT 1',
             [vote.vote_id]
@@ -148,7 +147,7 @@ router.get('/verify/:hash', async (req, res) => {
         res.json({
             verified: true,
             intact,
-            timestamp: recordedAt,
+            timestamp: vote.vote_timestamp,
             block_index: vote.vote_id
         });
     } catch (err) {
