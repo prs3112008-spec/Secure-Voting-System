@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
 const crypto = require('crypto'); // Node's built-in cryptography library
+const { rateLimit } = require('express-rate-limit');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 
@@ -15,8 +16,18 @@ const generateHash = (data) => {
     return crypto.createHash('sha256').update(data).digest('hex');
 };
 
+const castVoteRateLimit = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 10,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => res.status(429).json({
+        error: 'Too many vote attempts. Please try again later.'
+    })
+});
+
 // ROUTE: Cast a vote (Protected - Any Logged-in User)
-router.post('/cast', verifyToken, async (req, res) => {
+router.post('/cast', castVoteRateLimit, verifyToken, async (req, res) => {
     try {
         const { poll_id, candidate_id } = req.body;
         const pollCheck = await pool.query(
@@ -106,6 +117,46 @@ router.post('/cast', verifyToken, async (req, res) => {
     } catch (err) {
         console.error(err.message);
         res.status(500).json({ error: 'Server error casting vote.' });
+    }
+});
+
+// ROUTE: Publicly verify a vote receipt without disclosing ballot details
+router.get('/verify/:hash', async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT vote_id AS block_index, poll_id, candidate_id, voter_id, previous_hash, current_hash AS vote_hash, created_at AS timestamp FROM votes WHERE current_hash = $1',
+            [req.params.hash]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                verified: false,
+                message: 'Receipt hash not found in the ledger.'
+            });
+        }
+
+        const vote = result.rows[0];
+        const previousVote = await pool.query(
+            'SELECT current_hash FROM votes WHERE vote_id < $1 ORDER BY vote_id DESC LIMIT 1',
+            [vote.block_index]
+        );
+        const expectedPreviousHash = previousVote.rows.length > 0
+            ? previousVote.rows[0].current_hash
+            : '0';
+        const voteDataString = `${vote.poll_id}-${vote.candidate_id}-${vote.voter_id}-${vote.previous_hash}`;
+        const recalculatedHash = generateHash(voteDataString);
+        const intact = vote.previous_hash === expectedPreviousHash &&
+            recalculatedHash === vote.vote_hash;
+
+        res.json({
+            verified: true,
+            intact,
+            timestamp: vote.timestamp,
+            block_index: vote.block_index
+        });
+    } catch (err) {
+        console.error('VERIFY RECEIPT ERROR:', err.message);
+        res.status(500).json({ error: 'Failed to verify vote receipt.' });
     }
 });
 

@@ -3,6 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Pool } = require('pg');
+const { rateLimit } = require('express-rate-limit');
 const verifyToken = require('../middleware/verifyToken');
 
 const pool = new Pool({
@@ -10,8 +11,20 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
+const createAuthRateLimit = () => rateLimit({
+    windowMs: 15 * 60 * 1000,
+    limit: 15,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (req, res) => res.status(429).json({
+        error: 'Too many authentication attempts. Please try again later.'
+    })
+});
+const registerRateLimit = createAuthRateLimit();
+const loginRateLimit = createAuthRateLimit();
+
 // ROUTE 1: Register
-router.post('/register', async (req, res) => {
+router.post('/register', registerRateLimit, async (req, res) => {
     try {
         const { full_name, email, mobile_no, password } = req.body;
         if (!full_name || !email || !mobile_no || !password) {
@@ -39,7 +52,7 @@ router.post('/register', async (req, res) => {
 });
 
 // ROUTE 2: Login
-router.post('/login', async (req, res) => {
+router.post('/login', loginRateLimit, async (req, res) => {
     try {
         const { email, password } = req.body;
 
