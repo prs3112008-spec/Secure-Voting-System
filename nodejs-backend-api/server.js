@@ -6,6 +6,7 @@ const { Pool } = require('pg');
 const { initializeAuditLogs, logAdminAction, getLatestAuditLogs } = require('./utils/auditLog');
 const { verifyVoteChain } = require('./utils/voteChain');
 const logError = require('./utils/logError');
+const { errorHandler, notFound } = require('./middleware/errorHandler');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -46,20 +47,19 @@ const {
 } = require('./middleware/schemas');
 
 // GET all voters for the Admin Dashboard
-app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
+app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res, next) => {
     try {
         const result = await pool.query(
             "SELECT user_id, full_name, email, is_approved FROM users WHERE role IS DISTINCT FROM 'admin' ORDER BY created_at DESC"
         );
         res.json(result.rows);
     } catch (err) {
-        logError('Failed to load voters', err);
-        res.status(500).json({ error: 'Failed to load voters.' });
+        next(err);
     }
 });
 
 // PUT toggle a voter's approval status
-app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res) => {
+app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res, next) => {
     const { id } = req.params;
     const { is_approved } = req.body;
 
@@ -78,22 +78,20 @@ app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.
         );
         res.json({ message: 'Voter approval updated.', voter: result.rows[0] });
     } catch (err) {
-        logError('Failed to update voter approval', err);
-        res.status(500).json({ error: 'Failed to update voter approval.' });
+        next(err);
     }
 });
 
-app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
+app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res, next) => {
     try {
         const result = await getLatestAuditLogs();
         res.json(result.rows);
     } catch (err) {
-        logError('Failed to load audit logs', err);
-        res.status(500).json({ error: 'Failed to load audit logs.' });
+        next(err);
     }
 });
 
-app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, rateLimiters.admin, validate(optionalPollIdParamsSchema, 'params'), async (req, res) => {
+app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, rateLimiters.admin, validate(optionalPollIdParamsSchema, 'params'), async (req, res, next) => {
     try {
         const pollId = req.params.poll_id || '1';
         const pollResult = await pool.query(
@@ -171,8 +169,7 @@ app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], ver
         res.set('Content-Disposition', `attachment; filename="election-report-poll-${filenamePollId}.csv"`);
         res.send(csv);
     } catch (err) {
-        logError('Failed to export election results', err);
-        res.status(500).json({ error: 'Failed to export election results.' });
+        next(err);
     }
 });
 
@@ -195,6 +192,9 @@ pool.connect((err, client, release) => {
 app.get('/', (req, res) => {
     res.send('Secure Voting API is running!');
 });
+
+app.use(notFound);
+app.use(errorHandler);
 
 initializeAuditLogs()
     .then(() => app.listen(PORT, () => console.log(`Server running on port ${PORT}`)))

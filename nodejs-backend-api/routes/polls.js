@@ -7,7 +7,6 @@ const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 const validate = require('../middleware/validate');
 const { pollCreateSchema, pollIdParamsSchema } = require('../middleware/schemas');
-const logError = require('../utils/logError');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -15,18 +14,17 @@ const pool = new Pool({
 });
 
 // ROUTE 1: Get all polls (Protected Route - Requires Token)
-router.get('/', verifyToken, rateLimiters.voter, async (req, res) => {
+router.get('/', verifyToken, rateLimiters.voter, async (req, res, next) => {
     try {
         const allPolls = await pool.query('SELECT * FROM polls ORDER BY start_time DESC');
         res.json(allPolls.rows);
     } catch (err) {
-        logError('Poll lookup failed', err);
-        res.status(500).json({ error: 'Server error fetching polls.' });
+        next(err);
     }
 });
 
 // ROUTE 2: Create a new poll (Protected - Requires Token)
-router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(pollCreateSchema), async (req, res) => {
+router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(pollCreateSchema), async (req, res, next) => {
     try {
         const { title, description, start_time, end_time, is_private, security_code } = req.body;
         
@@ -41,13 +39,12 @@ router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(po
         }));
         res.status(201).json({ message: 'Poll created successfully!', poll: newPoll.rows[0] });
     } catch (err) {
-        logError('Poll creation failed', err);
-        res.status(500).json({ error: 'Server error creating poll.' });
+        next(err);
     }
 });
 
 // ROUTE: Get live results for a specific poll (Public or Protected)
-router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema, 'params'), async (req, res) => {
+router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema, 'params'), async (req, res, next) => {
     try {
         const { poll_id } = req.params;
 
@@ -82,8 +79,7 @@ router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema
             }
         });
     } catch (err) {
-        logError('Poll results lookup failed', err);
-        res.status(500).json({ error: 'Server error fetching results.' });
+        next(err);
     }
 });
 

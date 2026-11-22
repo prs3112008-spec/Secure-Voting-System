@@ -15,7 +15,7 @@ const pool = new Pool({
 });
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
-router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateSchema), async (req, res) => {
+router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateSchema), async (req, res, next) => {
     try {
         const { poll_id, name, party, photo_url } = req.body;
         
@@ -32,13 +32,12 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
         }));
         res.status(201).json(candidate);
     } catch (err) {
-        logError('Candidate creation failed', err);
-        res.status(500).json({ error: 'Server error adding candidate.' });
+        next(err);
     }
 });
 
 // ROUTE 2: Delete a candidate and their votes (Protected - Admins Only)
-router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateIdParamsSchema, 'params'), async (req, res) => {
+router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateIdParamsSchema, 'params'), async (req, res, next) => {
     let client;
 
     try {
@@ -59,8 +58,7 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, va
                 logError('Candidate deletion rollback failed', rollbackErr);
             }
         }
-        logError('Candidate deletion failed', err);
-        res.status(500).json({ error: 'Failed to delete candidate' });
+        next(err);
     } finally {
         if (client) {
             client.release();
@@ -69,7 +67,7 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, va
 });
 
 // ROUTE 3: Get all candidates for a specific poll (Protected - Any Logged-in Voter)
-router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSchema, 'params'), async (req, res) => {
+router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSchema, 'params'), async (req, res, next) => {
     try {
         const { poll_id } = req.params;
 
@@ -86,8 +84,7 @@ router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSc
         const candidates = await pool.query(query, [poll_id]);
         res.json(candidates.rows);
     } catch (err) {
-        logError('Candidate lookup failed', err);
-        res.status(500).json({ error: 'Server error fetching candidates.' });
+        next(err);
     }
 });
 

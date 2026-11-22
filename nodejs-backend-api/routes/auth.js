@@ -78,12 +78,12 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
             req.loginAccountEmail = req.loginUser ? req.loginUser.email : req.body.email;
             next();
         } catch (err) {
-            res.status(500).json({ error: 'Server error during login.' });
+            next(err);
         }
     };
 
     // ROUTE 1: Register
-    router.post('/register', limits.registerIp, validate(registerSchema), async (req, res) => {
+    router.post('/register', limits.registerIp, validate(registerSchema), async (req, res, next) => {
         try {
             const { full_name, email, mobile_no, password } = req.body;
 
@@ -102,13 +102,12 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
                 user: newUser.rows[0]
             });
         } catch (err) {
-            logError('Registration failed', err);
-            res.status(500).json({ error: 'Server error.' });
+            next(err);
         }
     });
 
     // ROUTE 2: Login
-    router.post('/login', limits.loginIp, validate(loginSchema), resolveLoginAccount, loginBackoff.middleware, async (req, res) => {
+    router.post('/login', limits.loginIp, validate(loginSchema), resolveLoginAccount, loginBackoff.middleware, async (req, res, next) => {
         try {
             const { email, password } = req.body;
 
@@ -138,11 +137,11 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
 
             res.json({ message: 'Login successful!', token: token, role: user.role });
         } catch (err) {
-            res.status(500).json({ error: 'Server error during login.' });
+            next(err);
         }
     });
 
-    router.post('/register-face', verifyToken, limits.voter, validate(faceEmbeddingSchema), async (req, res) => {
+    router.post('/register-face', verifyToken, limits.voter, validate(faceEmbeddingSchema), async (req, res, next) => {
         const { face_embedding } = req.body;
 
         let client;
@@ -199,14 +198,13 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
                     logError('Face registration rollback failed', rollbackErr);
                 }
             }
-            logError('Face registration failed', err);
-            res.status(500).json({ error: 'Server error registering face.' });
+            next(err);
         } finally {
             if (client) client.release();
         }
     });
 
-    router.get('/face-embedding', verifyToken, limits.voter, async (req, res) => {
+    router.get('/face-embedding', verifyToken, limits.voter, async (req, res, next) => {
         try {
             const result = await pool.query(
                 'SELECT face_embedding FROM users WHERE user_id = $1',
@@ -216,8 +214,7 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
 
             res.status(200).json({ face_embedding: result.rows[0].face_embedding });
         } catch (err) {
-            logError('Face embedding lookup failed', err);
-            res.status(500).json({ error: 'Server error retrieving face embedding.' });
+            next(err);
         }
     });
 

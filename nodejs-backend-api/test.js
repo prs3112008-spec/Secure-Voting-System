@@ -9,6 +9,7 @@ const os = require('node:os');
 const path = require('node:path');
 const authRouter = require('./routes/auth');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
+const { errorHandler, notFound } = require('./middleware/errorHandler');
 const getRequiredEnvironment = require('./utils/requiredEnv');
 const validate = require('./middleware/validate');
 const {
@@ -62,6 +63,59 @@ test('server exits before startup when required secrets are absent', () => {
     } finally {
         fs.rmSync(cwd, { recursive: true, force: true });
     }
+});
+
+test('unexpected errors, malformed JSON, and unknown routes return safe JSON', async t => {
+    const loggedErrors = [];
+    const originalConsoleError = console.error;
+    console.error = entry => loggedErrors.push(entry);
+    t.after(() => {
+        console.error = originalConsoleError;
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.get('/unexpected-error', (req, res, next) => {
+        const error = new Error(
+            'password=never-log-this JWT_SECRET=never-log-this DATABASE_URL=never-log-this Authorization: never-log-this'
+        );
+        error.code = 'XX000';
+        error.detail = 'raw database detail';
+        error.query = 'SELECT secret FROM users';
+        next(error);
+    });
+    app.use(notFound);
+    app.use(errorHandler);
+    const baseUrl = await listen(t, app);
+
+    const missingRoute = await fetch(`${baseUrl}/unknown-route`);
+    assert.equal(missingRoute.status, 404);
+    const missingBody = await missingRoute.json();
+    assert.deepEqual(missingBody, { error: 'Not found' });
+
+    const unexpectedError = await fetch(`${baseUrl}/unexpected-error`);
+    assert.equal(unexpectedError.status, 500);
+    const unexpectedBody = await unexpectedError.json();
+    assert.deepEqual(unexpectedBody, { error: 'Internal server error' });
+
+    const malformedJson = await fetch(`${baseUrl}/unexpected-error`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{"invalid":'
+    });
+    assert.equal(malformedJson.status, 400);
+    const malformedBody = await malformedJson.json();
+    assert.deepEqual(malformedBody, { error: 'Invalid JSON payload' });
+
+    for (const body of [missingBody, unexpectedBody, malformedBody]) {
+        assert.doesNotMatch(JSON.stringify(body), /never-log-this|raw database detail|SELECT secret|node_modules|\.js:\d+/i);
+    }
+
+    assert.equal(loggedErrors.length, 2);
+    const loggedError = JSON.parse(loggedErrors[0]);
+    assert.equal(loggedError.error.code, 'XX000');
+    const logOutput = loggedErrors.join('\n');
+    assert.doesNotMatch(logOutput, /never-log-this|raw database detail|SELECT secret/i);
 });
 
 test('failed logins back off by account and successful login resets the backoff', async t => {

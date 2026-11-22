@@ -13,7 +13,6 @@ const {
     scheduleSchema,
     voteSchema
 } = require('../middleware/schemas');
-const logError = require('../utils/logError');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -21,7 +20,7 @@ const pool = new Pool({
 });
 
 // ROUTE: Cast a vote (Protected - Any Logged-in User)
-router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), async (req, res) => {
+router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), async (req, res, next) => {
     try {
         const { poll_id, candidate_id } = req.body;
         const pollCheck = await pool.query(
@@ -109,13 +108,12 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
             current_hash: current_hash
         });
     } catch (err) {
-        logError('Vote casting failed', err);
-        res.status(500).json({ error: 'Server error casting vote.' });
+        next(err);
     }
 });
 
 // ROUTE: Publicly verify a vote receipt without disclosing ballot details
-router.get('/verify/:hash', rateLimiters.public, validate(receiptHashParamsSchema, 'params'), async (req, res) => {
+router.get('/verify/:hash', rateLimiters.public, validate(receiptHashParamsSchema, 'params'), async (req, res, next) => {
     try {
         const result = await pool.query(
             'SELECT vote_id, poll_id, candidate_id, voter_id, previous_hash, current_hash, vote_timestamp FROM votes WHERE current_hash = $1',
@@ -149,13 +147,12 @@ router.get('/verify/:hash', rateLimiters.public, validate(receiptHashParamsSchem
             block_index: vote.vote_id
         });
     } catch (err) {
-        logError('Vote receipt verification failed', err);
-        res.status(500).json({ error: 'Failed to verify vote receipt.' });
+        next(err);
     }
 });
 
 // ROUTE: Get the scheduled status of a poll
-router.get('/election-status/:poll_id', rateLimiters.public, validate(pollIdParamsSchema, 'params'), async (req, res) => {
+router.get('/election-status/:poll_id', rateLimiters.public, validate(pollIdParamsSchema, 'params'), async (req, res, next) => {
     try {
         const { poll_id } = req.params;
         const result = await pool.query(
@@ -190,13 +187,12 @@ router.get('/election-status/:poll_id', rateLimiters.public, validate(pollIdPara
             server_time_utc: now.toISOString()
         });
     } catch (err) {
-        logError('Election status lookup failed', err);
-        res.status(500).json({ error: 'Failed to fetch election status' });
+        next(err);
     }
 });
 
 // ROUTE: Update an election schedule (Admin only)
-router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, validate(scheduleSchema), async (req, res) => {
+router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, validate(scheduleSchema), async (req, res, next) => {
     try {
         const { poll_id, start_time, end_time, is_active } = req.body;
         const start = new Date(start_time);
@@ -248,25 +244,23 @@ router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, va
 
         res.json({ message: 'Election schedule updated successfully!' });
     } catch (err) {
-        logError('Election schedule update failed', err);
-        res.status(500).json({ error: 'Failed to update schedule' });
+        next(err);
     }
 });
 
 // ROUTE: Verify the integrity of the vote chain
-router.get('/verify-chain', rateLimiters.public, async (req, res) => {
+router.get('/verify-chain', rateLimiters.public, async (req, res, next) => {
     try {
         const chainStatus = await verifyVoteChain(pool);
         delete chainStatus.verified_blocks;
         res.json(chainStatus);
     } catch (err) {
-        logError('Vote chain verification failed', err);
-        res.status(500).json({ error: 'Failed to verify chain integrity.' });
+        next(err);
     }
 });
 
 // ROUTE: Check if the logged-in user has already voted in a poll
-router.get('/status/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSchema, 'params'), async (req, res) => {
+router.get('/status/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSchema, 'params'), async (req, res, next) => {
     try {
         const { poll_id } = req.params;
         const user_id = req.user.user_id; // Extracted securely from JWT
@@ -288,8 +282,7 @@ router.get('/status/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdP
             res.json({ hasVoted: false });
         }
     } catch (err) {
-        logError('Voter status lookup failed', err);
-        res.status(500).json({ error: 'Server error checking vote status.' });
+        next(err);
     }
 });
 
