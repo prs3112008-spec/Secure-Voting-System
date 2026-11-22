@@ -1,16 +1,18 @@
 require('dotenv').config();
+require('./utils/requiredEnv')();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { initializeAuditLogs, logAdminAction, getLatestAuditLogs } = require('./utils/auditLog');
 const { verifyVoteChain } = require('./utils/voteChain');
+const logError = require('./utils/logError');
 
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '5mb' }));
 app.use((req, res, next) => {
-    console.log(`${req.method} ${req.url}`);
+    console.log(`${req.method} request`);
     next();
 });
 app.use('/api/auth', require('./routes/auth'));
@@ -27,7 +29,7 @@ const pool = new Pool({
 // Test the connection
 pool.connect((err, client, release) => {
     if (err) {
-        return console.error('Error acquiring client', err.stack);
+        return logError('Initial database connection failed', err);
     }
     console.log('Successfully connected to the Secure Voting Database!');
     release();
@@ -51,7 +53,7 @@ app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async
         );
         res.json(result.rows);
     } catch (err) {
-        console.error(err);
+        logError('Failed to load voters', err);
         res.status(500).json({ error: 'Failed to load voters.' });
     }
 });
@@ -76,7 +78,7 @@ app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.
         );
         res.json({ message: 'Voter approval updated.', voter: result.rows[0] });
     } catch (err) {
-        console.error(err);
+        logError('Failed to update voter approval', err);
         res.status(500).json({ error: 'Failed to update voter approval.' });
     }
 });
@@ -86,7 +88,7 @@ app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, a
         const result = await getLatestAuditLogs();
         res.json(result.rows);
     } catch (err) {
-        console.error('LOAD AUDIT LOGS ERROR:', err);
+        logError('Failed to load audit logs', err);
         res.status(500).json({ error: 'Failed to load audit logs.' });
     }
 });
@@ -169,7 +171,7 @@ app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], ver
         res.set('Content-Disposition', `attachment; filename="election-report-poll-${filenamePollId}.csv"`);
         res.send(csv);
     } catch (err) {
-        console.error('EXPORT RESULTS ERROR:', err);
+        logError('Failed to export election results', err);
         res.status(500).json({ error: 'Failed to export election results.' });
     }
 });
@@ -183,7 +185,7 @@ const PORT = process.env.PORT || 5000;
 // Test the connection
 pool.connect((err, client, release) => {
     if (err) {
-        return console.error('Error acquiring client', err.stack);
+        return logError('Database connection failed', err);
     }
     console.log('Successfully connected to the Secure Voting Database!');
     release();
@@ -197,6 +199,6 @@ app.get('/', (req, res) => {
 initializeAuditLogs()
     .then(() => app.listen(PORT, () => console.log(`Server running on port ${PORT}`)))
     .catch(err => {
-        console.error('AUDIT LOG TABLE INITIALIZATION ERROR:', err);
+        logError('Audit log table initialization failed', err);
         process.exit(1);
     });

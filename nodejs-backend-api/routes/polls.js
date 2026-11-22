@@ -7,6 +7,7 @@ const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 const validate = require('../middleware/validate');
 const { pollCreateSchema, pollIdParamsSchema } = require('../middleware/schemas');
+const logError = require('../utils/logError');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -19,7 +20,7 @@ router.get('/', verifyToken, rateLimiters.voter, async (req, res) => {
         const allPolls = await pool.query('SELECT * FROM polls ORDER BY start_time DESC');
         res.json(allPolls.rows);
     } catch (err) {
-        console.error(err.message);
+        logError('Poll lookup failed', err);
         res.status(500).json({ error: 'Server error fetching polls.' });
     }
 });
@@ -40,7 +41,7 @@ router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(po
         }));
         res.status(201).json({ message: 'Poll created successfully!', poll: newPoll.rows[0] });
     } catch (err) {
-        console.error(err.message);
+        logError('Poll creation failed', err);
         res.status(500).json({ error: 'Server error creating poll.' });
     }
 });
@@ -81,7 +82,7 @@ router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema
             }
         });
     } catch (err) {
-        console.error(err.message);
+        logError('Poll results lookup failed', err);
         res.status(500).json({ error: 'Server error fetching results.' });
     }
 });

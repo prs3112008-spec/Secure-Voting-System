@@ -1,9 +1,15 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const bcrypt = require('bcryptjs');
+const childProcess = require('node:child_process');
+const crypto = require('node:crypto');
 const express = require('express');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const authRouter = require('./routes/auth');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
+const getRequiredEnvironment = require('./utils/requiredEnv');
 const validate = require('./middleware/validate');
 const {
     candidateIdParamsSchema,
@@ -27,9 +33,40 @@ function config(overrides = {}) {
     return getRateLimitConfig(overrides);
 }
 
+test('startup requires database and JWT secrets without exposing their values', () => {
+    assert.throws(
+        () => getRequiredEnvironment({}),
+        { message: 'Missing required environment variables: DATABASE_URL, JWT_SECRET' }
+    );
+
+    const provided = {
+        DATABASE_URL: 'postgresql://localhost:5432/test',
+        JWT_SECRET: crypto.randomBytes(32).toString('hex')
+    };
+    assert.deepEqual(getRequiredEnvironment(provided), provided);
+});
+
+test('server exits before startup when required secrets are absent', () => {
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'secure-voting-env-test-'));
+    const env = { ...process.env };
+    delete env.DATABASE_URL;
+    delete env.JWT_SECRET;
+    try {
+        const result = childProcess.spawnSync(
+            process.execPath,
+            [path.join(__dirname, 'server.js')],
+            { cwd, env, encoding: 'utf8' }
+        );
+        assert.equal(result.status, 1);
+        assert.match(result.stderr, /Missing required environment variables: DATABASE_URL, JWT_SECRET/);
+    } finally {
+        fs.rmSync(cwd, { recursive: true, force: true });
+    }
+});
+
 test('failed logins back off by account and successful login resets the backoff', async t => {
     const originalSecret = process.env.JWT_SECRET;
-    process.env.JWT_SECRET = 'test-secret';
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
     t.after(() => {
         if (originalSecret === undefined) delete process.env.JWT_SECRET;
         else process.env.JWT_SECRET = originalSecret;

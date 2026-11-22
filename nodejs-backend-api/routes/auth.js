@@ -7,6 +7,7 @@ const rateLimiters = require('../middleware/rateLimits');
 const { setRateLimitResponse } = rateLimiters;
 const validate = require('../middleware/validate');
 const { faceEmbeddingSchema, loginSchema, registerSchema } = require('../middleware/schemas');
+const logError = require('../utils/logError');
 
 const defaultPool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -101,7 +102,7 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
                 user: newUser.rows[0]
             });
         } catch (err) {
-            console.error('REGISTER ERROR:', err.message);
+            logError('Registration failed', err);
             res.status(500).json({ error: 'Server error.' });
         }
     });
@@ -195,10 +196,10 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
                 try {
                     await client.query('ROLLBACK');
                 } catch (rollbackErr) {
-                    console.error('Error rolling back face registration:', rollbackErr.message);
+                    logError('Face registration rollback failed', rollbackErr);
                 }
             }
-            console.error('Error registering face:', err.message);
+            logError('Face registration failed', err);
             res.status(500).json({ error: 'Server error registering face.' });
         } finally {
             if (client) client.release();
@@ -215,7 +216,7 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
 
             res.status(200).json({ face_embedding: result.rows[0].face_embedding });
         } catch (err) {
-            console.error('Error retrieving face embedding:', err.message);
+            logError('Face embedding lookup failed', err);
             res.status(500).json({ error: 'Server error retrieving face embedding.' });
         }
     });

@@ -1,4 +1,5 @@
 const { Pool } = require('pg');
+const logError = require('./logError');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -29,7 +30,7 @@ async function logAdminAction(adminUser, action, targetDetails) {
             [adminId, adminEmail, action, targetDetails]
         );
     } catch (err) {
-        console.error('ADMIN AUDIT LOG ERROR:', err);
+        logError('Admin audit logging failed', err);
     }
 }
 

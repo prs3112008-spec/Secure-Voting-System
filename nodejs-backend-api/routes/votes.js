@@ -13,6 +13,7 @@ const {
     scheduleSchema,
     voteSchema
 } = require('../middleware/schemas');
+const logError = require('../utils/logError');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -108,7 +109,7 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
             current_hash: current_hash
         });
     } catch (err) {
-        console.error(err.message);
+        logError('Vote casting failed', err);
         res.status(500).json({ error: 'Server error casting vote.' });
     }
 });
@@ -148,7 +149,7 @@ router.get('/verify/:hash', rateLimiters.public, validate(receiptHashParamsSchem
             block_index: vote.vote_id
         });
     } catch (err) {
-        console.error('Verify receipt error:', err);
+        logError('Vote receipt verification failed', err);
         res.status(500).json({ error: 'Failed to verify vote receipt.' });
     }
 });
@@ -189,7 +190,7 @@ router.get('/election-status/:poll_id', rateLimiters.public, validate(pollIdPara
             server_time_utc: now.toISOString()
         });
     } catch (err) {
-        console.error('ELECTION STATUS ERROR:', err.message);
+        logError('Election status lookup failed', err);
         res.status(500).json({ error: 'Failed to fetch election status' });
     }
 });
@@ -247,7 +248,7 @@ router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, va
 
         res.json({ message: 'Election schedule updated successfully!' });
     } catch (err) {
-        console.error('UPDATE SCHEDULE ERROR:', err.message);
+        logError('Election schedule update failed', err);
         res.status(500).json({ error: 'Failed to update schedule' });
     }
 });
@@ -259,7 +260,7 @@ router.get('/verify-chain', rateLimiters.public, async (req, res) => {
         delete chainStatus.verified_blocks;
         res.json(chainStatus);
     } catch (err) {
-        console.error('VERIFY CHAIN ERROR:', err.message);
+        logError('Vote chain verification failed', err);
         res.status(500).json({ error: 'Failed to verify chain integrity.' });
     }
 });
@@ -287,7 +288,7 @@ router.get('/status/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdP
             res.json({ hasVoted: false });
         }
     } catch (err) {
-        console.error(err.message);
+        logError('Voter status lookup failed', err);
         res.status(500).json({ error: 'Server error checking vote status.' });
     }
 });

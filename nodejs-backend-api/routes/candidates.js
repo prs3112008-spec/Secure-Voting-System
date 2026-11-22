@@ -7,6 +7,7 @@ const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 const validate = require('../middleware/validate');
 const { candidateIdParamsSchema, candidateSchema, pollIdParamsSchema } = require('../middleware/schemas');
+const logError = require('../utils/logError');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -31,7 +32,7 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
         }));
         res.status(201).json(candidate);
     } catch (err) {
-        console.error(err.message);
+        logError('Candidate creation failed', err);
         res.status(500).json({ error: 'Server error adding candidate.' });
     }
 });
@@ -55,10 +56,10 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, va
             try {
                 await client.query('ROLLBACK');
             } catch (rollbackErr) {
-                console.error('ROLLBACK CANDIDATE ERROR:', rollbackErr.message);
+                logError('Candidate deletion rollback failed', rollbackErr);
             }
         }
-        console.error('DELETE CANDIDATE ERROR:', err.message);
+        logError('Candidate deletion failed', err);
         res.status(500).json({ error: 'Failed to delete candidate' });
     } finally {
         if (client) {
@@ -85,7 +86,7 @@ router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSc
         const candidates = await pool.query(query, [poll_id]);
         res.json(candidates.rows);
     } catch (err) {
-        console.error(err.message);
+        logError('Candidate lookup failed', err);
         res.status(500).json({ error: 'Server error fetching candidates.' });
     }
 });
