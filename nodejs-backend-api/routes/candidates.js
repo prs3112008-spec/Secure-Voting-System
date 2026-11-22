@@ -20,7 +20,7 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
         
         const newCandidate = await pool.query(
             'INSERT INTO candidates (poll_id, candidate_name, party, photo_url) VALUES ($1, $2, $3, $4) RETURNING *',
-            [poll_id || 1, name, party, photo_url || '']
+            [poll_id || 1, name, party, photo_url]
         );
 
         const candidate = newCandidate.rows[0];

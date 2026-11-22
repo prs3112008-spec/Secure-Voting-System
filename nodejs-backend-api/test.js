@@ -113,29 +113,34 @@ test('strict schemas validate candidate, vote, and receipt inputs', async t => {
         candidate_id: 3,
         poll_id: 9
     });
-    assert.deepEqual(candidateSchema.parse({ name: 'Jordan Lee', party: 'Civic Party' }), {
+    assert.deepEqual(candidateSchema.parse({
         name: 'Jordan Lee',
-        party: 'Civic Party'
+        party: 'Civic Party',
+        photo_url: 'https://images.example.com/jordan.jpg'
+    }), {
+        name: 'Jordan Lee',
+        party: 'Civic Party',
+        photo_url: 'https://images.example.com/jordan.jpg'
     });
     assert.deepEqual(candidateSchema.parse({
         name: 'Jordan Lee',
         party: null,
-        photo_url: null
+        photo_url: 'data:image/png;base64,AAAA'
     }), {
         name: 'Jordan Lee',
         party: 'Independent',
-        photo_url: null
+        photo_url: 'data:image/png;base64,AAAA'
     });
     assert.deepEqual(candidateSchema.parse({
         name: 'Jordan Lee',
         party: '',
         poll_id: '12',
-        photo_url: ''
+        photo_url: 'https://images.example.com/jordan.jpg'
     }), {
         name: 'Jordan Lee',
         party: 'Independent',
         poll_id: 12,
-        photo_url: ''
+        photo_url: 'https://images.example.com/jordan.jpg'
     });
     assert.equal(candidateSchema.safeParse({
         name: 'Jordan Lee',
@@ -146,6 +151,16 @@ test('strict schemas validate candidate, vote, and receipt inputs', async t => {
         name: 'Jordan Lee',
         party: 'Civic Party',
         photo_url: 'A'.repeat(4_000_001)
+    }).success, false);
+    assert.equal(candidateSchema.safeParse({
+        name: 'Jordan Lee',
+        party: 'Civic Party',
+        photo_url: null
+    }).success, false);
+    assert.equal(candidateSchema.safeParse({
+        name: 'Jordan Lee',
+        party: 'Civic Party',
+        photo_url: ''
     }).success, false);
     assert.deepEqual(candidateIdParamsSchema.parse({ candidate_id: '15' }), { candidate_id: 15 });
     assert.deepEqual(voterIdParamsSchema.parse({ id: '23' }), { id: 23 });
@@ -161,11 +176,50 @@ test('strict schemas validate candidate, vote, and receipt inputs', async t => {
 
     const app = express();
     app.use(express.json());
+    app.post('/api/admin/candidates', validate(candidateSchema), (req, res) => {
+        res.status(201).json(req.body);
+    });
     app.post('/api/votes/cast', validate(voteSchema), (req, res) => res.json(req.body));
     app.get('/api/votes/verify/:hash', validate(receiptHashParamsSchema, 'params'), (req, res) => {
         res.sendStatus(204);
     });
     const baseUrl = await listen(t, app);
+
+    const candidateWithoutPhoto = await fetch(`${baseUrl}/api/admin/candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Jordan Lee', party: 'Civic Party' })
+    });
+    assert.equal(candidateWithoutPhoto.status, 400);
+    const missingPhotoBody = await candidateWithoutPhoto.json();
+    assert.equal(missingPhotoBody.error, 'Validation failed');
+    assert.ok(Array.isArray(missingPhotoBody.details));
+
+    for (const photoUrl of [null, '']) {
+        const invalidCandidate = await fetch(`${baseUrl}/api/admin/candidates`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                name: 'Jordan Lee',
+                party: 'Civic Party',
+                photo_url: photoUrl
+            })
+        });
+        assert.equal(invalidCandidate.status, 400);
+        assert.equal((await invalidCandidate.json()).error, 'Validation failed');
+    }
+
+    const validCandidate = await fetch(`${baseUrl}/api/admin/candidates`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: 'Jordan Lee',
+            party: 'Civic Party',
+            photo_url: 'data:image/png;base64,AAAA'
+        })
+    });
+    assert.equal(validCandidate.status, 201);
+    assert.equal((await validCandidate.json()).photo_url, 'data:image/png;base64,AAAA');
 
     const validVote = await fetch(`${baseUrl}/api/votes/cast`, {
         method: 'POST',

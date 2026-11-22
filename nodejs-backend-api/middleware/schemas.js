@@ -36,11 +36,30 @@ const registerSchema = z.object({
 
 const candidateName = z.string().trim().min(2).max(60).regex(/^[a-zA-Z0-9 .\-()+]+$/);
 const party = z.string().trim().max(50).refine(value => value.length === 0 || value.length >= 2);
-const photoUrl = z.string().max(4_000_000).refine(value => (
-    value === '' ||
-    /^data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/]+={0,2}$/.test(value) ||
-    z.string().url().safeParse(value).success
-)).nullable().optional();
+function isImageDataUri(value) {
+    const match = /^data:image\/[a-zA-Z0-9.+-]+;base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+    if (!match) return false;
+
+    const payload = match[1];
+    if (payload.length % 4 === 1) return false;
+    const paddedPayload = payload.padEnd(Math.ceil(payload.length / 4) * 4, '=');
+    const decoded = Buffer.from(paddedPayload, 'base64');
+    return decoded.length > 0 && decoded.toString('base64') === paddedPayload;
+}
+
+function isHttpUrl(value) {
+    try {
+        const url = new URL(value);
+        return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch (err) {
+        return false;
+    }
+}
+
+const photoUrl = z.string().min(1).max(4_000_000).refine(
+    value => isImageDataUri(value) || isHttpUrl(value),
+    'Must be an HTTP(S) URL or Base64 image data URI.'
+);
 const candidateSchema = z.object({
     name: candidateName.optional(),
     candidate_name: candidateName.optional(),
