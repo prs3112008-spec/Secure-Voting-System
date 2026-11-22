@@ -3,6 +3,7 @@ const router = express.Router();
 const { Pool } = require('pg');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 
 const pool = new Pool({
@@ -11,7 +12,7 @@ const pool = new Pool({
 });
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
-router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, async (req, res) => {
+router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     try {
         const { poll_id, name, candidate_name, party, photo_url } = req.body;
         const finalName = candidate_name || name;
@@ -35,7 +36,7 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, async (req, re
 });
 
 // ROUTE 2: Delete a candidate and their votes (Protected - Admins Only)
-router.delete('/:candidate_id', verifyToken, verifyAdmin, async (req, res) => {
+router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     let client;
 
     try {
@@ -66,7 +67,7 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // ROUTE 3: Get all candidates for a specific poll (Protected - Any Logged-in Voter)
-router.get('/:poll_id', verifyToken, async (req, res) => {
+router.get('/:poll_id', verifyToken, rateLimiters.voter, async (req, res) => {
     try {
         const { poll_id } = req.params;
 

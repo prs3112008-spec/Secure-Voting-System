@@ -3,6 +3,7 @@ const router = express.Router();
 const { Pool } = require('pg');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 
 const pool = new Pool({
@@ -11,7 +12,7 @@ const pool = new Pool({
 });
 
 // ROUTE 1: Get all polls (Protected Route - Requires Token)
-router.get('/', verifyToken, async (req, res) => {
+router.get('/', verifyToken, rateLimiters.voter, async (req, res) => {
     try {
         const allPolls = await pool.query('SELECT * FROM polls ORDER BY start_time DESC');
         res.json(allPolls.rows);
@@ -22,7 +23,7 @@ router.get('/', verifyToken, async (req, res) => {
 });
 
 // ROUTE 2: Create a new poll (Protected - Requires Token)
-router.post('/create', verifyToken, verifyAdmin, async (req, res) => {
+router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     try {
         const { title, description, start_time, end_time, is_private, security_code } = req.body;
         
@@ -43,7 +44,7 @@ router.post('/create', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // ROUTE: Get live results for a specific poll (Public or Protected)
-router.get('/:poll_id/results', async (req, res) => {
+router.get('/:poll_id/results', rateLimiters.public, async (req, res) => {
     try {
         const { poll_id } = req.params;
 

@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
-const { rateLimit } = require('express-rate-limit');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 const { generateHash, verifyVoteChain } = require('../utils/voteChain');
 
@@ -12,18 +12,8 @@ const pool = new Pool({
     ssl: { rejectUnauthorized: false }
 });
 
-const castVoteRateLimit = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    limit: 10,
-    standardHeaders: true,
-    legacyHeaders: false,
-    handler: (req, res) => res.status(429).json({
-        error: 'Too many vote attempts. Please try again later.'
-    })
-});
-
 // ROUTE: Cast a vote (Protected - Any Logged-in User)
-router.post('/cast', castVoteRateLimit, verifyToken, async (req, res) => {
+router.post('/cast', verifyToken, rateLimiters.voter, async (req, res) => {
     try {
         const { poll_id, candidate_id } = req.body;
         const pollCheck = await pool.query(
@@ -117,7 +107,7 @@ router.post('/cast', castVoteRateLimit, verifyToken, async (req, res) => {
 });
 
 // ROUTE: Publicly verify a vote receipt without disclosing ballot details
-router.get('/verify/:hash', async (req, res) => {
+router.get('/verify/:hash', rateLimiters.public, async (req, res) => {
     try {
         const result = await pool.query(
             'SELECT vote_id, poll_id, candidate_id, voter_id, previous_hash, current_hash, vote_timestamp FROM votes WHERE current_hash = $1',
@@ -157,7 +147,7 @@ router.get('/verify/:hash', async (req, res) => {
 });
 
 // ROUTE: Get the scheduled status of a poll
-router.get('/election-status/:poll_id', async (req, res) => {
+router.get('/election-status/:poll_id', rateLimiters.public, async (req, res) => {
     try {
         const { poll_id } = req.params;
         const result = await pool.query(
@@ -198,7 +188,7 @@ router.get('/election-status/:poll_id', async (req, res) => {
 });
 
 // ROUTE: Update an election schedule (Admin only)
-router.post('/update-schedule', verifyToken, verifyAdmin, async (req, res) => {
+router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     try {
         const { poll_id, start_time, end_time, is_active } = req.body;
         const start = new Date(start_time);
@@ -256,7 +246,7 @@ router.post('/update-schedule', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // ROUTE: Verify the integrity of the vote chain
-router.get('/verify-chain', async (req, res) => {
+router.get('/verify-chain', rateLimiters.public, async (req, res) => {
     try {
         const chainStatus = await verifyVoteChain(pool);
         delete chainStatus.verified_blocks;
@@ -268,7 +258,7 @@ router.get('/verify-chain', async (req, res) => {
 });
 
 // ROUTE: Check if the logged-in user has already voted in a poll
-router.get('/status/:poll_id', verifyToken, async (req, res) => {
+router.get('/status/:poll_id', verifyToken, rateLimiters.voter, async (req, res) => {
     try {
         const { poll_id } = req.params;
         const user_id = req.user.user_id; // Extracted securely from JWT

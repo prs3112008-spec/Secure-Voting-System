@@ -35,9 +35,10 @@ pool.connect((err, client, release) => {
 
 const verifyToken = require('./middleware/verifyToken');
 const verifyAdmin = require('./middleware/verifyAdmin');
+const rateLimiters = require('./middleware/rateLimits');
 
 // GET all voters for the Admin Dashboard
-app.get('/api/admin/voters', verifyToken, verifyAdmin, async (req, res) => {
+app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     try {
         const result = await pool.query(
             "SELECT user_id, full_name, email, is_approved FROM users WHERE role IS DISTINCT FROM 'admin' ORDER BY created_at DESC"
@@ -50,7 +51,7 @@ app.get('/api/admin/voters', verifyToken, verifyAdmin, async (req, res) => {
 });
 
 // PUT toggle a voter's approval status
-app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, async (req, res) => {
+app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     const { id } = req.params;
     const { is_approved } = req.body;
 
@@ -78,7 +79,7 @@ app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, async (req, r
     }
 });
 
-app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, async (req, res) => {
+app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     try {
         const result = await getLatestAuditLogs();
         res.json(result.rows);
@@ -88,7 +89,7 @@ app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, async (req, res) => {
     }
 });
 
-app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, async (req, res) => {
+app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
     try {
         const pollId = req.params.poll_id || '1';
         const pollResult = await pool.query(
