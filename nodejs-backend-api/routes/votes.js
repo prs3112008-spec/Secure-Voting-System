@@ -124,7 +124,7 @@ router.post('/cast', castVoteRateLimit, verifyToken, async (req, res) => {
 router.get('/verify/:hash', async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT vote_id AS block_index, poll_id, candidate_id, voter_id, previous_hash, current_hash AS vote_hash, timestamp FROM votes WHERE current_hash = $1',
+            'SELECT * FROM votes WHERE current_hash = $1',
             [req.params.hash]
         );
 
@@ -136,9 +136,10 @@ router.get('/verify/:hash', async (req, res) => {
         }
 
         const vote = result.rows[0];
+        const recordedAt = vote.timestamp || vote.created_at || vote.voted_at || vote.cast_at || null;
         const previousVote = await pool.query(
-            'SELECT current_hash FROM votes WHERE vote_id < $1 ORDER BY vote_id DESC LIMIT 1',
-            [vote.block_index]
+            'SELECT * FROM votes WHERE vote_id < $1 ORDER BY vote_id DESC LIMIT 1',
+            [vote.vote_id]
         );
         const expectedPreviousHash = previousVote.rows.length > 0
             ? previousVote.rows[0].current_hash
@@ -146,13 +147,13 @@ router.get('/verify/:hash', async (req, res) => {
         const voteDataString = `${vote.poll_id}-${vote.candidate_id}-${vote.voter_id}-${vote.previous_hash}`;
         const recalculatedHash = generateHash(voteDataString);
         const intact = vote.previous_hash === expectedPreviousHash &&
-            recalculatedHash === vote.vote_hash;
+            recalculatedHash === vote.current_hash;
 
         res.json({
             verified: true,
             intact,
-            timestamp: vote.timestamp,
-            block_index: vote.block_index
+            timestamp: recordedAt,
+            block_index: vote.vote_id
         });
     } catch (err) {
         console.error('Verify receipt error:', err);
