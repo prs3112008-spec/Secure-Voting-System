@@ -1,21 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const { Pool } = require('pg');
-const crypto = require('crypto'); // Node's built-in cryptography library
 const { rateLimit } = require('express-rate-limit');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const { logAdminAction } = require('../utils/auditLog');
+const { generateHash, verifyVoteChain } = require('../utils/voteChain');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
 });
-
-// Helper function to create a secure SHA-256 hash
-const generateHash = (data) => {
-    return crypto.createHash('sha256').update(data).digest('hex');
-};
 
 const castVoteRateLimit = rateLimit({
     windowMs: 15 * 60 * 1000,
@@ -264,51 +259,9 @@ router.post('/update-schedule', verifyToken, verifyAdmin, async (req, res) => {
 // ROUTE: Verify the integrity of the vote chain
 router.get('/verify-chain', async (req, res) => {
     try {
-        const result = await pool.query(
-            'SELECT vote_id, poll_id, candidate_id, voter_id, previous_hash, current_hash FROM votes ORDER BY vote_id ASC'
-        );
-        const votes = result.rows;
-
-        if (votes.length === 0) {
-            return res.json({
-                valid: true,
-                total_votes: 0,
-                message: 'No votes cast yet. Ledger is clean.'
-            });
-        }
-
-        let expectedPrevHash = '0';
-
-        for (const vote of votes) {
-            if (vote.previous_hash !== expectedPrevHash) {
-                return res.json({
-                    valid: false,
-                    total_votes: votes.length,
-                    tampered_vote_id: vote.vote_id,
-                    message: `Chain broken at Vote ID #${vote.vote_id}: previous_hash mismatch.`
-                });
-            }
-
-            const rawData = `${vote.poll_id}-${vote.candidate_id}-${vote.voter_id}-${vote.previous_hash}`;
-            const recalculatedHash = generateHash(rawData);
-
-            if (recalculatedHash !== vote.current_hash) {
-                return res.json({
-                    valid: false,
-                    total_votes: votes.length,
-                    tampered_vote_id: vote.vote_id,
-                    message: `Data tampered at Vote ID #${vote.vote_id}: hash mismatch!`
-                });
-            }
-
-            expectedPrevHash = vote.current_hash;
-        }
-
-        res.json({
-            valid: true,
-            total_votes: votes.length,
-            message: `Blockchain Intact! All ${votes.length} vote(s) verified with 0 tampering.`
-        });
+        const chainStatus = await verifyVoteChain(pool);
+        delete chainStatus.verified_blocks;
+        res.json(chainStatus);
     } catch (err) {
         console.error('VERIFY CHAIN ERROR:', err.message);
         res.status(500).json({ error: 'Failed to verify chain integrity.' });

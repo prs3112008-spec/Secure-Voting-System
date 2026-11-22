@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const { initializeAuditLogs, logAdminAction, getLatestAuditLogs } = require('./utils/auditLog');
+const { verifyVoteChain } = require('./utils/voteChain');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -84,6 +85,89 @@ app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, async (req, res) => {
     } catch (err) {
         console.error('LOAD AUDIT LOGS ERROR:', err);
         res.status(500).json({ error: 'Failed to load audit logs.' });
+    }
+});
+
+app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const pollId = req.params.poll_id || '1';
+        const pollResult = await pool.query(
+            'SELECT poll_id, title, is_active, start_time, end_time FROM polls WHERE poll_id = $1',
+            [pollId]
+        );
+        if (pollResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Poll not found.' });
+        }
+
+        const poll = pollResult.rows[0];
+        const [turnoutResult, candidateResult, chainStatus] = await Promise.all([
+            pool.query(`
+                SELECT
+                    (SELECT COUNT(*) FROM votes WHERE poll_id = $1) AS total_votes_cast,
+                    (SELECT COUNT(*) FROM users WHERE role IS DISTINCT FROM 'admin' AND is_approved IS TRUE) AS approved_voters
+            `, [pollId]),
+            pool.query(`
+                SELECT c.candidate_name, c.party, COUNT(v.vote_id) AS votes
+                FROM candidates c
+                LEFT JOIN votes v ON v.candidate_id = c.candidate_id AND v.poll_id = c.poll_id
+                WHERE c.poll_id = $1
+                GROUP BY c.candidate_id, c.candidate_name, c.party
+                ORDER BY COUNT(v.vote_id) DESC, c.candidate_id ASC
+            `, [pollId]),
+            verifyVoteChain(pool)
+        ]);
+
+        const totalVotesCast = Number(turnoutResult.rows[0].total_votes_cast);
+        const approvedVoters = Number(turnoutResult.rows[0].approved_voters);
+        const turnoutPercentage = approvedVoters === 0
+            ? 0
+            : Math.round((totalVotesCast / approvedVoters) * 1000) / 10;
+        const exportTimestamp = new Date().toISOString();
+        const csvRows = [
+            ['Election Metadata'],
+            ['Poll ID', poll.poll_id],
+            ['Poll Title', poll.title],
+            ['Active', poll.is_active],
+            ['Start Time', poll.start_time],
+            ['End Time', poll.end_time],
+            ['Export Timestamp (UTC)', exportTimestamp],
+            [],
+            ['Voter Turnout'],
+            ['Total Votes Cast', totalVotesCast],
+            ['Approved Voters', approvedVoters],
+            ['Turnout Percentage', turnoutPercentage],
+            [],
+            ['Chain Verification'],
+            ['Status', chainStatus.valid ? 'INTACT' : 'COMPROMISED'],
+            ['Total Blocks', chainStatus.total_votes],
+            ['Total Blocks Verified', chainStatus.verified_blocks],
+            [],
+            ['Candidate Name', 'Party', 'Votes', 'Vote Share %']
+        ];
+
+        for (const candidate of candidateResult.rows) {
+            const votes = Number(candidate.votes);
+            const voteShare = totalVotesCast === 0
+                ? 0
+                : Math.round((votes / totalVotesCast) * 1000) / 10;
+            csvRows.push([candidate.candidate_name, candidate.party, votes, voteShare]);
+        }
+
+        const csvEscape = value => `"${String(value === null || value === undefined ? '' : value).replace(/"/g, '""')}"`;
+        const csv = csvRows.map(row => row.map(csvEscape).join(',')).join('\r\n');
+        const filenamePollId = String(poll.poll_id).replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        await logAdminAction(req.user, 'EXPORT_RESULTS', JSON.stringify({
+            poll_id: poll.poll_id,
+            title: poll.title
+        }));
+
+        res.set('Content-Type', 'text/csv; charset=utf-8');
+        res.set('Content-Disposition', `attachment; filename="election-report-poll-${filenamePollId}.csv"`);
+        res.send(csv);
+    } catch (err) {
+        console.error('EXPORT RESULTS ERROR:', err);
+        res.status(500).json({ error: 'Failed to export election results.' });
     }
 });
 
