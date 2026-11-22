@@ -194,7 +194,8 @@ router.get('/election-status/:poll_id', async (req, res) => {
             status,
             is_active: poll.is_active,
             start_time: poll.start_time,
-            end_time: poll.end_time
+            end_time: poll.end_time,
+            server_time_utc: now.toISOString()
         });
     } catch (err) {
         console.error('ELECTION STATUS ERROR:', err.message);

@@ -47,18 +47,35 @@ router.get('/:poll_id/results', async (req, res) => {
     try {
         const { poll_id } = req.params;
 
-        const results = await pool.query(`
-            SELECT c.candidate_id, c.candidate_name, c.party, c.photo_url, COUNT(v.vote_id) as vote_count
-            FROM candidates c
-            LEFT JOIN votes v ON c.candidate_id = v.candidate_id
-            WHERE c.poll_id = $1
-            GROUP BY c.candidate_id, c.candidate_name, c.party, c.photo_url
-            ORDER BY vote_count DESC;
-        `, [poll_id]);
+        const [results, turnoutResult] = await Promise.all([
+            pool.query(`
+                SELECT c.candidate_id, c.candidate_name, c.party, c.photo_url, COUNT(v.vote_id) as vote_count
+                FROM candidates c
+                LEFT JOIN votes v ON c.candidate_id = v.candidate_id
+                WHERE c.poll_id = $1
+                GROUP BY c.candidate_id, c.candidate_name, c.party, c.photo_url
+                ORDER BY vote_count DESC;
+            `, [poll_id]),
+            pool.query(`
+                SELECT
+                    (SELECT COUNT(*) FROM votes WHERE poll_id = $1) AS total_votes_cast,
+                    (SELECT COUNT(*) FROM users WHERE role = 'voter' AND is_approved = TRUE) AS approved_voters
+            `, [poll_id])
+        ]);
+        const totalVotesCast = Number(turnoutResult.rows[0].total_votes_cast);
+        const approvedVoters = Number(turnoutResult.rows[0].approved_voters);
+        const turnoutPercentage = approvedVoters === 0
+            ? 0
+            : Math.round((totalVotesCast / approvedVoters) * 1000) / 10;
 
         res.json({
             poll_id: poll_id,
-            results: results.rows
+            results: results.rows,
+            turnout: {
+                total_votes_cast: totalVotesCast,
+                approved_voters: approvedVoters,
+                turnout_percentage: turnoutPercentage
+            }
         });
     } catch (err) {
         console.error(err.message);
