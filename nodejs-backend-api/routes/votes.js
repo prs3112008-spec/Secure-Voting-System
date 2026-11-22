@@ -124,7 +124,7 @@ router.post('/cast', castVoteRateLimit, verifyToken, async (req, res) => {
 router.get('/verify/:hash', async (req, res) => {
     try {
         const result = await pool.query(
-            'SELECT vote_id AS block_index, poll_id, candidate_id, voter_id, previous_hash, current_hash AS vote_hash, created_at AS timestamp FROM votes WHERE current_hash = $1',
+            'SELECT vote_id AS block_index, poll_id, candidate_id, voter_id, previous_hash, current_hash AS vote_hash, timestamp FROM votes WHERE current_hash = $1',
             [req.params.hash]
         );
 
@@ -155,7 +155,7 @@ router.get('/verify/:hash', async (req, res) => {
             block_index: vote.block_index
         });
     } catch (err) {
-        console.error('VERIFY RECEIPT ERROR:', err.message);
+        console.error('Verify receipt error:', err);
         res.status(500).json({ error: 'Failed to verify vote receipt.' });
     }
 });
