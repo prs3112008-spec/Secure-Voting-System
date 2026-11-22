@@ -39,7 +39,7 @@ const verifyAdmin = require('./middleware/verifyAdmin');
 app.get('/api/admin/voters', verifyToken, verifyAdmin, async (req, res) => {
     try {
         const result = await pool.query(
-            "SELECT user_id, full_name, email, is_approved FROM users WHERE role = 'voter' ORDER BY created_at DESC"
+            "SELECT user_id, full_name, email, is_approved FROM users WHERE role IS DISTINCT FROM 'admin' ORDER BY created_at DESC"
         );
         res.json(result.rows);
     } catch (err) {

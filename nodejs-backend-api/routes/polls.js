@@ -59,7 +59,7 @@ router.get('/:poll_id/results', async (req, res) => {
             pool.query(`
                 SELECT
                     (SELECT COUNT(*) FROM votes WHERE poll_id = $1) AS total_votes_cast,
-                    (SELECT COUNT(*) FROM users WHERE role = 'voter' AND is_approved = TRUE) AS approved_voters
+                    (SELECT COUNT(*) FROM users WHERE role IS DISTINCT FROM 'admin' AND is_approved IS TRUE) AS approved_voters
             `, [poll_id])
         ]);
         const totalVotesCast = Number(turnoutResult.rows[0].total_votes_cast);
