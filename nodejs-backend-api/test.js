@@ -3,8 +3,10 @@ const { test } = require('node:test');
 const bcrypt = require('bcryptjs');
 const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
+const cors = require('cors');
 const express = require('express');
 const fs = require('node:fs');
+const helmet = require('helmet');
 const os = require('node:os');
 const path = require('node:path');
 const authRouter = require('./routes/auth');
@@ -33,6 +35,25 @@ async function listen(t, app) {
 function config(overrides = {}) {
     return getRateLimitConfig(overrides);
 }
+
+test('API responses include Helmet security headers without disrupting CORS or JSON', async t => {
+    const app = express();
+    app.use(helmet());
+    app.use(cors());
+    app.get('/api/security-headers', (req, res) => res.json({ ok: true }));
+    const baseUrl = await listen(t, app);
+
+    const response = await fetch(`${baseUrl}/api/security-headers`, {
+        headers: { Origin: 'https://android.example' }
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(response.headers.get('x-frame-options'), 'SAMEORIGIN');
+    assert.equal(response.headers.get('x-powered-by'), null);
+    assert.equal(response.headers.get('access-control-allow-origin'), '*');
+    assert.deepEqual(await response.json(), { ok: true });
+});
 
 test('startup requires database and JWT secrets without exposing their values', () => {
     assert.throws(
