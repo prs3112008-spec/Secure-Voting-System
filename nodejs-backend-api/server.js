@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const { initializeAuditLogs, logAdminAction, getLatestAuditLogs } = require('./utils/auditLog');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -64,10 +65,25 @@ app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, async (req, r
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Voter not found.' });
         }
+        await logAdminAction(
+            req.user,
+            is_approved ? 'APPROVE_VOTER' : 'REVOKE_VOTER',
+            JSON.stringify({ voter_id: result.rows[0].user_id, is_approved })
+        );
         res.json({ message: 'Voter approval updated.', voter: result.rows[0] });
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to update voter approval.' });
+    }
+});
+
+app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, async (req, res) => {
+    try {
+        const result = await getLatestAuditLogs();
+        res.json(result.rows);
+    } catch (err) {
+        console.error('LOAD AUDIT LOGS ERROR:', err);
+        res.status(500).json({ error: 'Failed to load audit logs.' });
     }
 });
 
@@ -77,7 +93,6 @@ app.get('/', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 // Test the connection
 pool.connect((err, client, release) => {
     if (err) {
@@ -91,3 +106,10 @@ pool.connect((err, client, release) => {
 app.get('/', (req, res) => {
     res.send('Secure Voting API is running!');
 });
+
+initializeAuditLogs()
+    .then(() => app.listen(PORT, () => console.log(`Server running on port ${PORT}`)))
+    .catch(err => {
+        console.error('AUDIT LOG TABLE INITIALIZATION ERROR:', err);
+        process.exit(1);
+    });

@@ -3,6 +3,7 @@ const router = express.Router();
 const { Pool } = require('pg');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const { logAdminAction } = require('../utils/auditLog');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -30,6 +31,10 @@ router.post('/create', verifyToken, verifyAdmin, async (req, res) => {
             [title, description, start_time, end_time, is_private, security_code, req.user.user_id] // Notice req.user.user_id comes securely from the token!
         );
 
+        await logAdminAction(req.user, 'CREATE_POLL', JSON.stringify({
+            poll_id: newPoll.rows[0].poll_id,
+            title: newPoll.rows[0].title
+        }));
         res.status(201).json({ message: 'Poll created successfully!', poll: newPoll.rows[0] });
     } catch (err) {
         console.error(err.message);

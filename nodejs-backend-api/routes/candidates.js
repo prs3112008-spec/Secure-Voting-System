@@ -3,6 +3,7 @@ const router = express.Router();
 const { Pool } = require('pg');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const { logAdminAction } = require('../utils/auditLog');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -20,7 +21,13 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, async (req, re
             [poll_id || 1, finalName, party || 'Independent', photo_url || '']
         );
 
-        res.status(201).json(newCandidate.rows[0]);
+        const candidate = newCandidate.rows[0];
+        await logAdminAction(req.user, 'ADD_CANDIDATE', JSON.stringify({
+            candidate_id: candidate.candidate_id,
+            candidate_name: candidate.candidate_name,
+            poll_id: candidate.poll_id
+        }));
+        res.status(201).json(candidate);
     } catch (err) {
         console.error(err.message);
         res.status(500).json({ error: 'Server error adding candidate.' });
@@ -39,6 +46,7 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, async (req, res) => {
         await client.query('DELETE FROM candidates WHERE candidate_id = $1', [candidate_id]);
         await client.query('COMMIT');
 
+        await logAdminAction(req.user, 'DELETE_CANDIDATE', JSON.stringify({ candidate_id }));
         res.json({ message: 'Candidate deleted successfully!' });
     } catch (err) {
         if (client) {

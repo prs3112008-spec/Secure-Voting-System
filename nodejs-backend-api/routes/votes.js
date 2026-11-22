@@ -5,6 +5,7 @@ const crypto = require('crypto'); // Node's built-in cryptography library
 const { rateLimit } = require('express-rate-limit');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const { logAdminAction } = require('../utils/auditLog');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -222,6 +223,14 @@ router.post('/update-schedule', verifyToken, verifyAdmin, async (req, res) => {
             });
         }
 
+        const pollStatus = await pool.query(
+            'SELECT is_active FROM polls WHERE poll_id = $1',
+            [poll_id]
+        );
+        if (pollStatus.rows.length === 0) {
+            return res.status(404).json({ error: 'Poll not found' });
+        }
+
         const result = await pool.query(
             'UPDATE polls SET start_time = $1, end_time = $2, is_active = $3 WHERE poll_id = $4 RETURNING poll_id',
             [start_time, end_time, is_active, poll_id]
@@ -230,6 +239,19 @@ router.post('/update-schedule', verifyToken, verifyAdmin, async (req, res) => {
         if (result.rows.length === 0) {
             return res.status(404).json({ error: 'Poll not found' });
         }
+
+        if (pollStatus.rows[0].is_active !== is_active) {
+            await logAdminAction(req.user, 'TOGGLE_ELECTION', JSON.stringify({
+                poll_id,
+                is_active
+            }));
+        }
+        await logAdminAction(req.user, 'UPDATE_SCHEDULE', JSON.stringify({
+            poll_id,
+            start_time,
+            end_time,
+            is_active
+        }));
 
         res.json({ message: 'Election schedule updated successfully!' });
     } catch (err) {
