@@ -5,6 +5,8 @@ const { Pool } = require('pg');
 const verifyToken = require('../middleware/verifyToken');
 const rateLimiters = require('../middleware/rateLimits');
 const { setRateLimitResponse } = rateLimiters;
+const validate = require('../middleware/validate');
+const { faceEmbeddingSchema, loginSchema, registerSchema } = require('../middleware/schemas');
 
 const defaultPool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -17,7 +19,7 @@ function createLoginBackoff(config) {
 
     return {
         middleware(req, res, next) {
-            const email = normalizeEmail(req.body && req.body.email);
+            const email = normalizeEmail(req.loginAccountEmail || (req.body && req.body.email));
             const account = accounts.get(email);
             if (!account) return next();
 
@@ -65,14 +67,24 @@ function createLoginBackoff(config) {
 function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
     const router = express.Router();
     const loginBackoff = createLoginBackoff(limits.config);
+    const resolveLoginAccount = async (req, res, next) => {
+        try {
+            const result = await pool.query(
+                'SELECT * FROM users WHERE email = $1 OR mobile_no = $1',
+                [req.body.email]
+            );
+            req.loginUser = result.rows[0] || null;
+            req.loginAccountEmail = req.loginUser ? req.loginUser.email : req.body.email;
+            next();
+        } catch (err) {
+            res.status(500).json({ error: 'Server error during login.' });
+        }
+    };
 
     // ROUTE 1: Register
-    router.post('/register', limits.registerIp, async (req, res) => {
+    router.post('/register', limits.registerIp, validate(registerSchema), async (req, res) => {
         try {
             const { full_name, email, mobile_no, password } = req.body;
-            if (!full_name || !email || !mobile_no || !password) {
-                return res.status(400).json({ error: 'All fields are required.' });
-            }
 
             const userExists = await pool.query('SELECT * FROM users WHERE email = $1 OR mobile_no = $2', [email, mobile_no]);
             if (userExists.rows.length > 0) return res.status(400).json({ error: 'User already exists.' });
@@ -95,46 +107,42 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
     });
 
     // ROUTE 2: Login
-    router.post('/login', limits.loginIp, loginBackoff.middleware, async (req, res) => {
+    router.post('/login', limits.loginIp, validate(loginSchema), resolveLoginAccount, loginBackoff.middleware, async (req, res) => {
         try {
             const { email, password } = req.body;
 
-            const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-            if (user.rows.length === 0) {
-                loginBackoff.recordFailure(email);
+            const user = req.loginUser;
+            if (!user) {
+                loginBackoff.recordFailure(req.loginAccountEmail);
                 return res.status(401).json({ error: 'Invalid email or password.' });
             }
 
-            const validPassword = await bcrypt.compare(password, user.rows[0].password_hash);
+            const validPassword = await bcrypt.compare(password, user.password_hash);
             if (!validPassword) {
-                loginBackoff.recordFailure(email);
+                loginBackoff.recordFailure(req.loginAccountEmail);
                 return res.status(401).json({ error: 'Invalid email or password.' });
             }
 
-            loginBackoff.reset(email);
+            loginBackoff.reset(req.loginAccountEmail);
 
-            if (user.rows[0].role !== 'admin' && !user.rows[0].is_approved) {
+            if (user.role !== 'admin' && !user.is_approved) {
                 return res.status(403).json({ error: 'Your account is pending Admin approval. Please wait for verification.' });
             }
 
             const token = jwt.sign(
-                { user_id: user.rows[0].user_id, role: user.rows[0].role },
+                { user_id: user.user_id, role: user.role },
                 process.env.JWT_SECRET,
                 { expiresIn: '2h' }
             );
 
-            res.json({ message: 'Login successful!', token: token, role: user.rows[0].role });
+            res.json({ message: 'Login successful!', token: token, role: user.role });
         } catch (err) {
             res.status(500).json({ error: 'Server error during login.' });
         }
     });
 
-    router.post('/register-face', verifyToken, limits.voter, async (req, res) => {
-        const face_embedding = req.body && req.body.face_embedding;
-        if (!Array.isArray(face_embedding) || face_embedding.length !== 192 ||
-            !face_embedding.every(value => typeof value === 'number' && Number.isFinite(value))) {
-            return res.status(400).json({ error: 'face_embedding must be an array of 192 finite numbers.' });
-        }
+    router.post('/register-face', verifyToken, limits.voter, validate(faceEmbeddingSchema), async (req, res) => {
+        const { face_embedding } = req.body;
 
         let client;
         let transactionStarted = false;

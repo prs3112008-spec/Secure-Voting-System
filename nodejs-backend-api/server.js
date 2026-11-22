@@ -36,6 +36,12 @@ pool.connect((err, client, release) => {
 const verifyToken = require('./middleware/verifyToken');
 const verifyAdmin = require('./middleware/verifyAdmin');
 const rateLimiters = require('./middleware/rateLimits');
+const validate = require('./middleware/validate');
+const {
+    optionalPollIdParamsSchema,
+    voterApprovalSchema,
+    voterIdParamsSchema
+} = require('./middleware/schemas');
 
 // GET all voters for the Admin Dashboard
 app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
@@ -51,13 +57,9 @@ app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async
 });
 
 // PUT toggle a voter's approval status
-app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
+app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res) => {
     const { id } = req.params;
     const { is_approved } = req.body;
-
-    if (typeof is_approved !== 'boolean') {
-        return res.status(400).json({ error: 'is_approved must be a boolean.' });
-    }
 
     try {
         const result = await pool.query(
@@ -89,7 +91,7 @@ app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, a
     }
 });
 
-app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
+app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, rateLimiters.admin, validate(optionalPollIdParamsSchema, 'params'), async (req, res) => {
     try {
         const pollId = req.params.poll_id || '1';
         const pollResult = await pool.query(

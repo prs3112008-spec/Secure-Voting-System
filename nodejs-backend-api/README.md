@@ -24,3 +24,7 @@ Rate limiting is in-memory per backend process. Configure it with these environm
 Failed login backoff is keyed by normalized email. A correct password clears that account's failure state. All rate-limit responses use HTTP 429 with `RateLimit-*` headers, `Retry-After`, and a JSON retry duration. Express trusts the single reverse proxy hop used by the production load balancer.
 
 The in-memory counters reset when the process restarts and are not shared across multiple backend instances.
+
+## Request validation
+
+Request bodies and path parameters that carry input are validated with strict Zod schemas. Invalid requests receive HTTP 400 as `{ error: "Validation failed", details: [...] }`; unknown body fields are rejected. Login accepts `identifier` (email or 10-digit mobile) and continues to accept the existing `email` field. Vote casting accepts `election_id` and the existing `poll_id` alias. Numeric IDs accept positive integer strings or numbers. Candidate creation accepts `name` and the existing `candidate_name` alias; empty or null `party` uses the existing `Independent` default, and `photo_url` accepts an empty/null value, a URL, or a Base64 image data URI up to 4,000,000 characters. Receipt verification requires a 64-character hexadecimal hash. Voter identity for vote casting is taken from the verified token, not a client-supplied `voter_id`.

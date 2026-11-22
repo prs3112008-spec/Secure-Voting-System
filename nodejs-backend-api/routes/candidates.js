@@ -5,6 +5,8 @@ const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
+const validate = require('../middleware/validate');
+const { candidateIdParamsSchema, candidateSchema, pollIdParamsSchema } = require('../middleware/schemas');
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -12,14 +14,13 @@ const pool = new Pool({
 });
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
-router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
+router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateSchema), async (req, res) => {
     try {
-        const { poll_id, name, candidate_name, party, photo_url } = req.body;
-        const finalName = candidate_name || name;
+        const { poll_id, name, party, photo_url } = req.body;
         
         const newCandidate = await pool.query(
             'INSERT INTO candidates (poll_id, candidate_name, party, photo_url) VALUES ($1, $2, $3, $4) RETURNING *',
-            [poll_id || 1, finalName, party || 'Independent', photo_url || '']
+            [poll_id || 1, name, party, photo_url || '']
         );
 
         const candidate = newCandidate.rows[0];
@@ -36,7 +37,7 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
 });
 
 // ROUTE 2: Delete a candidate and their votes (Protected - Admins Only)
-router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res) => {
+router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateIdParamsSchema, 'params'), async (req, res) => {
     let client;
 
     try {
@@ -67,7 +68,7 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, as
 });
 
 // ROUTE 3: Get all candidates for a specific poll (Protected - Any Logged-in Voter)
-router.get('/:poll_id', verifyToken, rateLimiters.voter, async (req, res) => {
+router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSchema, 'params'), async (req, res) => {
     try {
         const { poll_id } = req.params;
 

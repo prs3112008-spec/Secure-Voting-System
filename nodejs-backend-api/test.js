@@ -4,6 +4,14 @@ const bcrypt = require('bcryptjs');
 const express = require('express');
 const authRouter = require('./routes/auth');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
+const validate = require('./middleware/validate');
+const {
+    candidateIdParamsSchema,
+    candidateSchema,
+    receiptHashParamsSchema,
+    voterIdParamsSchema,
+    voteSchema
+} = require('./middleware/schemas');
 
 async function listen(t, app) {
     const server = await new Promise(resolve => {
@@ -54,16 +62,24 @@ test('failed logins back off by account and successful login resets the backoff'
     app.use(express.json());
     app.use('/api/auth', authRouter.createAuthRouter(fakePool, limits));
     const baseUrl = await listen(t, app);
-    const login = password => fetch(`${baseUrl}/api/auth/login`, {
+    const login = (password, identifier = 'Voter@example.com') => fetch(`${baseUrl}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'Voter@example.com', password })
+        body: JSON.stringify({ identifier, password })
     });
 
-    assert.equal((await login('wrong')).status, 401);
-    assert.equal((await login('wrong')).status, 401);
+    const invalidPayload = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identifier: 'Voter@example.com', password: 'wrongpass', unexpected: true })
+    });
+    assert.equal(invalidPayload.status, 400);
+    assert.equal((await invalidPayload.json()).error, 'Validation failed');
 
-    const blocked = await login('wrong');
+    assert.equal((await login('wrongpass')).status, 401);
+    assert.equal((await login('wrongpass', '1234567890')).status, 401);
+
+    const blocked = await login('wrongpass');
     assert.equal(blocked.status, 429);
     assert.equal(blocked.headers.get('retry-after'), '1');
     assert.equal(blocked.headers.get('ratelimit-limit'), '2');
@@ -73,19 +89,109 @@ test('failed logins back off by account and successful login resets the backoff'
     });
 
     await new Promise(resolve => setTimeout(resolve, 1050));
-    assert.equal((await login('wrong')).status, 401);
-    const exponentialBackoff = await login('wrong');
+    assert.equal((await login('wrongpass')).status, 401);
+    const exponentialBackoff = await login('wrongpass');
     assert.equal(exponentialBackoff.status, 429);
     assert.equal(exponentialBackoff.headers.get('retry-after'), '2');
 
     await new Promise(resolve => setTimeout(resolve, 2050));
     assert.equal((await login('correct-password')).status, 200);
 
-    assert.equal((await login('wrong')).status, 401);
-    assert.equal((await login('wrong')).status, 401);
-    const afterReset = await login('wrong');
+    assert.equal((await login('wrongpass')).status, 401);
+    assert.equal((await login('wrongpass')).status, 401);
+    const afterReset = await login('wrongpass');
     assert.equal(afterReset.status, 429);
     assert.equal(afterReset.headers.get('retry-after'), '1');
+});
+
+test('strict schemas validate candidate, vote, and receipt inputs', async t => {
+    assert.deepEqual(voteSchema.parse({ candidate_id: 3, election_id: 9 }), {
+        candidate_id: 3,
+        poll_id: 9
+    });
+    assert.deepEqual(voteSchema.parse({ candidate_id: '3', election_id: '9' }), {
+        candidate_id: 3,
+        poll_id: 9
+    });
+    assert.deepEqual(candidateSchema.parse({ name: 'Jordan Lee', party: 'Civic Party' }), {
+        name: 'Jordan Lee',
+        party: 'Civic Party'
+    });
+    assert.deepEqual(candidateSchema.parse({
+        name: 'Jordan Lee',
+        party: null,
+        photo_url: null
+    }), {
+        name: 'Jordan Lee',
+        party: 'Independent',
+        photo_url: null
+    });
+    assert.deepEqual(candidateSchema.parse({
+        name: 'Jordan Lee',
+        party: '',
+        poll_id: '12',
+        photo_url: ''
+    }), {
+        name: 'Jordan Lee',
+        party: 'Independent',
+        poll_id: 12,
+        photo_url: ''
+    });
+    assert.equal(candidateSchema.safeParse({
+        name: 'Jordan Lee',
+        party: null,
+        photo_url: `data:image/png;base64,${'A'.repeat(3_900_000)}`
+    }).success, true);
+    assert.equal(candidateSchema.safeParse({
+        name: 'Jordan Lee',
+        party: 'Civic Party',
+        photo_url: 'A'.repeat(4_000_001)
+    }).success, false);
+    assert.deepEqual(candidateIdParamsSchema.parse({ candidate_id: '15' }), { candidate_id: 15 });
+    assert.deepEqual(voterIdParamsSchema.parse({ id: '23' }), { id: 23 });
+    assert.equal(candidateSchema.safeParse({
+        name: 'Invalid <Name>',
+        party: 'Civic Party'
+    }).success, false);
+    assert.equal(voteSchema.safeParse({
+        candidate_id: '3',
+        election_id: 9
+    }).success, true);
+    assert.equal(receiptHashParamsSchema.safeParse({ hash: 'g'.repeat(64) }).success, false);
+
+    const app = express();
+    app.use(express.json());
+    app.post('/api/votes/cast', validate(voteSchema), (req, res) => res.json(req.body));
+    app.get('/api/votes/verify/:hash', validate(receiptHashParamsSchema, 'params'), (req, res) => {
+        res.sendStatus(204);
+    });
+    const baseUrl = await listen(t, app);
+
+    const validVote = await fetch(`${baseUrl}/api/votes/cast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate_id: 3, election_id: 9 })
+    });
+    assert.equal(validVote.status, 200);
+    assert.deepEqual(await validVote.json(), { candidate_id: 3, poll_id: 9 });
+
+    const invalidVote = await fetch(`${baseUrl}/api/votes/cast`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate_id: 3, election_id: 9, extra: true })
+    });
+    assert.equal(invalidVote.status, 400);
+    const invalidVoteBody = await invalidVote.json();
+    assert.deepEqual(Object.keys(invalidVoteBody).sort(), ['details', 'error']);
+    assert.equal(invalidVoteBody.error, 'Validation failed');
+    assert.ok(Array.isArray(invalidVoteBody.details));
+
+    const malformedHash = await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(63)}`);
+    assert.equal(malformedHash.status, 400);
+    assert.equal((await malformedHash.json()).error, 'Validation failed');
+    assert.equal((await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(65)}`)).status, 400);
+    assert.equal((await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(1024)}`)).status, 400);
+    assert.equal((await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(64)}`)).status, 204);
 });
 
 test('public endpoints are rate limited using configured moderate thresholds', async t => {
