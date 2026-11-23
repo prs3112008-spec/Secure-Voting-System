@@ -501,6 +501,44 @@ test('vote casting requires a verification token before accessing the database',
     assert.equal((await response.json()).error, 'Validation failed');
 });
 
+test('admins and other non-voter roles are forbidden from casting votes', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/votes', votesRouter.createVotesRouter({
+        async connect() {
+            throw new Error('Database should not be reached for non-voters.');
+        }
+    }));
+    const baseUrl = await listen(t, app);
+    for (const role of ['admin', 'auditor']) {
+        const accessToken = jwt.sign(
+            { user_id: 7, role },
+            process.env.JWT_SECRET,
+            { expiresIn: '2h' }
+        );
+        const response = await fetch(`${baseUrl}/api/votes/cast`, {
+            method: 'POST',
+            headers: {
+                Authorization: `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({})
+        });
+
+        assert.equal(response.status, 403);
+        assert.deepEqual(await response.json(), {
+            error: 'Administrators are not permitted to cast votes'
+        });
+    }
+});
+
 test('vote casting serializes ledger writes and maps unique conflicts to 409', async t => {
     const originalSecret = process.env.JWT_SECRET;
     process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
@@ -587,6 +625,51 @@ test('vote casting serializes ledger writes and maps unique conflicts to 409', a
     assert.deepEqual(await conflict.json(), { error: 'You have already voted in this poll' });
     assert.equal(queries.includes('ROLLBACK'), true);
     assert.equal(released, 2);
+});
+
+test('vote-chain verification rejects unauthenticated and non-admin requests', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    let chainScans = 0;
+    const app = express();
+    app.set('trust proxy', 1);
+    app.use('/api/votes', votesRouter.createVotesRouter({
+        async query() {
+            chainScans += 1;
+            return { rows: [] };
+        }
+    }));
+    const baseUrl = await listen(t, app);
+
+    const unauthenticated = await fetch(`${baseUrl}/api/votes/verify-chain`);
+    assert.equal(unauthenticated.status, 401);
+
+    const voterToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const nonAdmin = await fetch(`${baseUrl}/api/votes/verify-chain`, {
+        headers: { Authorization: `Bearer ${voterToken}` }
+    });
+    assert.equal(nonAdmin.status, 403);
+    assert.equal(chainScans, 0);
+
+    const adminToken = jwt.sign(
+        { user_id: 99, role: 'admin' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const adminResponse = await fetch(`${baseUrl}/api/votes/verify-chain`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+    });
+    assert.equal(adminResponse.status, 200);
+    assert.equal(chainScans, 1);
 });
 
 test('candidate deletion returns conflict when votes exist', async t => {
@@ -702,11 +785,11 @@ test('environment overrides change the active threshold', async t => {
     const limits = createRateLimiters();
     const app = express();
     app.set('trust proxy', 1);
-    app.get('/api/votes/verify-chain', limits.public, (req, res) => res.sendStatus(204));
+    app.get('/api/polls/1/results', limits.public, (req, res) => res.sendStatus(204));
     const baseUrl = await listen(t, app);
 
-    assert.equal((await fetch(`${baseUrl}/api/votes/verify-chain`)).status, 204);
-    const blocked = await fetch(`${baseUrl}/api/votes/verify-chain`);
+    assert.equal((await fetch(`${baseUrl}/api/polls/1/results`)).status, 204);
+    const blocked = await fetch(`${baseUrl}/api/polls/1/results`);
     assert.equal(blocked.status, 429);
     assert.equal(blocked.headers.get('ratelimit-limit'), '1');
 });

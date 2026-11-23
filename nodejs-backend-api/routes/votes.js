@@ -18,11 +18,18 @@ const {
     verifyVerificationToken
 } = require('../utils/verificationToken');
 
+function requireVoter(req, res, next) {
+    if (req.user.role !== 'voter') {
+        return res.status(403).json({ error: 'Administrators are not permitted to cast votes' });
+    }
+    next();
+}
+
 function createVotesRouter(pool = sharedPool) {
 const router = express.Router();
 
-// ROUTE: Cast a vote (Protected - Any Logged-in User)
-router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), async (req, res, next) => {
+// ROUTE: Cast a vote (Protected - Voters Only)
+router.post('/cast', verifyToken, requireVoter, rateLimiters.voter, validate(voteSchema), async (req, res, next) => {
     let client;
     let transactionOpen = false;
 
@@ -80,8 +87,8 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
 
         const { role, is_approved } = userCheck.rows[0];
 
-        if (role === 'admin') {
-            return res.status(403).json({ error: 'Admins are not permitted to cast votes.' });
+        if (role !== 'voter') {
+            return res.status(403).json({ error: 'Administrators are not permitted to cast votes' });
         }
 
         if (!is_approved) {
@@ -236,22 +243,6 @@ router.get('/election-status/:poll_id', rateLimiters.public, validate(pollIdPara
 router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, validate(scheduleSchema), async (req, res, next) => {
     try {
         const { poll_id, start_time, end_time, is_active } = req.body;
-        const start = new Date(start_time);
-        const end = new Date(end_time);
-
-        if (
-            poll_id === undefined || poll_id === null || poll_id === '' ||
-            start_time === undefined || start_time === null || start_time === '' ||
-            end_time === undefined || end_time === null || end_time === '' ||
-            typeof is_active !== 'boolean' ||
-            Number.isNaN(start.getTime()) ||
-            Number.isNaN(end.getTime()) ||
-            end <= start
-        ) {
-            return res.status(400).json({
-                error: 'poll_id, valid start_time and end_time, and boolean is_active are required.'
-            });
-        }
 
         const pollStatus = await pool.query(
             'SELECT is_active FROM polls WHERE poll_id = $1',
@@ -290,7 +281,7 @@ router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, va
 });
 
 // ROUTE: Verify the integrity of the vote chain
-router.get('/verify-chain', rateLimiters.public, async (req, res, next) => {
+router.get('/verify-chain', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res, next) => {
     try {
         const chainStatus = await verifyVoteChain(pool);
         delete chainStatus.verified_blocks;

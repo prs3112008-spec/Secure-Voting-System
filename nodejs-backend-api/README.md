@@ -29,8 +29,10 @@ The in-memory counters reset when the process restarts and are not shared across
 
 Set `DATABASE_URL` and `JWT_SECRET` in the deployment environment. The server exits at startup with the missing variable names if either is unset or blank. Copy `.env.example` for local setup and replace its placeholders; `.env` and other local credential files are ignored by Git.
 
+Initialize the database by applying `schema.sql` before starting the API with `npm start`.
+
 ## Request validation
 
 Request bodies and path parameters that carry input are validated with strict Zod schemas. Invalid requests receive HTTP 400 as `{ error: "Validation failed", details: [...] }`; unknown body fields are rejected. Login accepts `identifier` (email or 10-digit mobile) and continues to accept the existing `email` field. Vote casting accepts `election_id` and the existing `poll_id` alias and requires a `verification_token` from `POST /api/auth/verify-face`. Face verification accepts a 192-number embedding and returns a two-minute, single-use token; the token is tracked in process memory and therefore is not shared across backend instances. Face embeddings are never returned by an API route. Numeric IDs accept positive integer strings or numbers. Candidate creation accepts `name` and the existing `candidate_name` alias; empty or null `party` uses the existing `Independent` default. A non-empty `photo_url` is required and must be an HTTP(S) URL or a Base64 image data URI up to 4,000,000 characters. Receipt verification requires a 64-character hexadecimal hash. Voter identity for vote casting is taken from the verified token, not a client-supplied `voter_id`.
 
-Registration leaves new voters unapproved and returns a ten-minute `enroll_token` scoped only to `POST /api/auth/register-face`. Candidate deletion is rejected when ledger votes reference that candidate.
+Registration leaves new voters unapproved and returns a ten-minute `enroll_token` scoped only to `POST /api/auth/register-face`. Only voters may cast ballots, and candidate deletion is rejected when ledger votes reference that candidate. Full vote-chain verification is restricted to administrators.

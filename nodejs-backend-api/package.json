@@ -2,9 +2,9 @@
   "name": "nodejs-backend-api",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
   "scripts": {
-    "test": "node --test test.js"
+    "test": "node --test test.js",
+    "start": "node server.js"
   },
   "keywords": [],
   "author": "",
