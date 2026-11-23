@@ -21,6 +21,11 @@ const {
     consumeVerificationToken,
     issueVerificationToken
 } = require('./utils/verificationToken');
+const {
+    buildVoteHashInput,
+    generateHash,
+    verifyVoteChain
+} = require('./utils/voteChain');
 const validate = require('./middleware/validate');
 const {
     candidateIdParamsSchema,
@@ -550,10 +555,11 @@ test('vote casting serializes ledger writes and maps unique conflicts to 409', a
     const queries = [];
     let released = 0;
     let failInsert = false;
+    const voteInserts = [];
     const fakePool = {
         async connect() {
             return {
-                async query(query) {
+                async query(query, params) {
                     queries.push(query);
                     if (query === 'SELECT start_time, end_time, is_active FROM polls WHERE poll_id = $1') {
                         return {
@@ -570,16 +576,19 @@ test('vote casting serializes ledger writes and maps unique conflicts to 409', a
                     if (query === 'SELECT role, is_approved FROM users WHERE user_id = $1') {
                         return { rows: [{ role: 'voter', is_approved: true }] };
                     }
-                    if (query === 'SELECT * FROM votes WHERE poll_id = $1 AND voter_id = $2') {
+                    if (query === 'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2') {
                         return { rows: [] };
                     }
                     if (query === 'SELECT current_hash FROM votes ORDER BY vote_id DESC LIMIT 1') {
                         return { rows: [] };
                     }
-                    if (query.startsWith('INSERT INTO votes') && failInsert) {
-                        const error = new Error('duplicate vote');
-                        error.code = '23505';
-                        throw error;
+                    if (query.startsWith('INSERT INTO votes')) {
+                        voteInserts.push({ query, params });
+                        if (failInsert) {
+                            const error = new Error('duplicate vote');
+                            error.code = '23505';
+                            throw error;
+                        }
                     }
                     return { rows: [] };
                 },
@@ -609,14 +618,36 @@ test('vote casting serializes ledger writes and maps unique conflicts to 409', a
     const success = await castVote(issueVerificationToken(7));
 
     assert.equal(success.status, 201);
+    const successBody = await success.json();
+    assert.deepEqual(Object.keys(successBody).sort(), [
+        'current_hash',
+        'hash',
+        'message',
+        'receipt_hash'
+    ]);
+    assert.equal(successBody.receipt_hash, successBody.current_hash);
+    assert.equal(voteInserts.length, 1);
+    assert.match(voteInserts[0].query, /^INSERT INTO votes \(poll_id, candidate_id, ballot_nonce, previous_hash, current_hash\)/);
+    assert.doesNotMatch(voteInserts[0].query, /\bvoter_id\b/);
+    assert.equal(voteInserts[0].params.length, 5);
+    assert.match(voteInserts[0].params[2], /^[a-f0-9]{64}$/);
+    assert.equal(successBody.current_hash, generateHash(buildVoteHashInput({
+        poll_id: 9,
+        candidate_id: 3,
+        ballot_nonce: voteInserts[0].params[2],
+        previous_hash: '0'
+    })));
+
     const lockIndex = queries.indexOf('SELECT pg_advisory_xact_lock(1247112202)');
-    const duplicateCheckIndex = queries.indexOf('SELECT * FROM votes WHERE poll_id = $1 AND voter_id = $2');
+    const duplicateCheckIndex = queries.indexOf('SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2');
     const latestHashIndex = queries.indexOf('SELECT current_hash FROM votes ORDER BY vote_id DESC LIMIT 1');
+    const turnoutInsertIndex = queries.indexOf('INSERT INTO voter_turnout (poll_id, voter_id) VALUES ($1, $2)');
     const insertIndex = queries.findIndex(query => query.startsWith('INSERT INTO votes'));
     assert.ok(queries.indexOf('BEGIN') < lockIndex);
     assert.ok(lockIndex < duplicateCheckIndex);
     assert.ok(duplicateCheckIndex < latestHashIndex);
-    assert.ok(latestHashIndex < insertIndex);
+    assert.ok(latestHashIndex < turnoutInsertIndex);
+    assert.ok(turnoutInsertIndex < insertIndex);
     assert.ok(insertIndex < queries.indexOf('COMMIT'));
 
     failInsert = true;
@@ -625,6 +656,164 @@ test('vote casting serializes ledger writes and maps unique conflicts to 409', a
     assert.deepEqual(await conflict.json(), { error: 'You have already voted in this poll' });
     assert.equal(queries.includes('ROLLBACK'), true);
     assert.equal(released, 2);
+});
+
+test('vote status reveals only whether the authenticated voter has voted', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const results = [{ rows: [] }, { rows: [{ '?column?': 1 }] }];
+    const queries = [];
+    const app = express();
+    app.set('trust proxy', 1);
+    app.use('/api/votes', votesRouter.createVotesRouter({
+        async query(query) {
+            queries.push(query);
+            return results.shift();
+        }
+    }));
+    const baseUrl = await listen(t, app);
+    const accessToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const headers = { Authorization: `Bearer ${accessToken}` };
+
+    const notVoted = await fetch(`${baseUrl}/api/votes/status/9`, { headers });
+    assert.deepEqual(await notVoted.json(), { hasVoted: false });
+    const hasVoted = await fetch(`${baseUrl}/api/votes/status/9`, { headers });
+    assert.deepEqual(await hasVoted.json(), { hasVoted: true });
+    assert.deepEqual(queries, [
+        'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2',
+        'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2'
+    ]);
+});
+
+test('repeat voting is blocked using voter turnout', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const queries = [];
+    const app = express();
+    app.use(express.json());
+    app.use('/api/votes', votesRouter.createVotesRouter({
+        async connect() {
+            return {
+                async query(query) {
+                    queries.push(query);
+                    if (query === 'SELECT start_time, end_time, is_active FROM polls WHERE poll_id = $1') {
+                        return {
+                            rows: [{
+                                start_time: new Date(Date.now() - 60_000),
+                                end_time: new Date(Date.now() + 60_000),
+                                is_active: true
+                            }]
+                        };
+                    }
+                    if (query === 'SELECT 1 FROM candidates WHERE candidate_id = $1 AND poll_id = $2') {
+                        return { rows: [{}] };
+                    }
+                    if (query === 'SELECT role, is_approved FROM users WHERE user_id = $1') {
+                        return { rows: [{ role: 'voter', is_approved: true }] };
+                    }
+                    if (query === 'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2') {
+                        return { rows: [{}] };
+                    }
+                    return { rows: [] };
+                },
+                release() {}
+            };
+        }
+    }));
+    const baseUrl = await listen(t, app);
+    const accessToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const response = await fetch(`${baseUrl}/api/votes/cast`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            candidate_id: 3,
+            poll_id: 9,
+            verification_token: issueVerificationToken(7)
+        })
+    });
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), { error: 'You have already voted in this poll' });
+    assert.ok(queries.includes('SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2'));
+    assert.equal(queries.some(query => query.startsWith('INSERT INTO votes')), false);
+});
+
+test('anonymous ballot schema and vote-chain receipt verification do not use voter IDs', async t => {
+    const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
+    const voteTable = schema.match(/CREATE TABLE IF NOT EXISTS votes \([\s\S]*?\n\);/);
+    assert.ok(voteTable);
+    assert.doesNotMatch(voteTable[0], /\bvoter_id\b/);
+    assert.match(voteTable[0], /ballot_nonce VARCHAR\(64\) NOT NULL/);
+
+    const ballot = {
+        vote_id: 1,
+        poll_id: 9,
+        candidate_id: 3,
+        ballot_nonce: crypto.randomBytes(32).toString('hex'),
+        previous_hash: '0',
+        vote_timestamp: new Date('2026-01-02T03:04:05.000Z').toISOString()
+    };
+    ballot.current_hash = generateHash(buildVoteHashInput(ballot));
+    assert.equal(Object.prototype.hasOwnProperty.call(ballot, 'voter_id'), false);
+
+    let chainQuery;
+    const chainStatus = await verifyVoteChain({
+        async query(query) {
+            chainQuery = query;
+            return { rows: [ballot] };
+        }
+    });
+    assert.equal(chainStatus.valid, true);
+    assert.equal(chainStatus.verified_blocks, 1);
+    assert.equal(
+        chainQuery,
+        'SELECT vote_id, poll_id, candidate_id, ballot_nonce, previous_hash, current_hash FROM votes ORDER BY vote_id ASC'
+    );
+    assert.doesNotMatch(chainQuery, /\bvoter_id\b/);
+
+    const app = express();
+    app.use('/api/votes', votesRouter.createVotesRouter({
+        async query(query) {
+            if (query === 'SELECT vote_id, poll_id, candidate_id, ballot_nonce, previous_hash, current_hash, vote_timestamp FROM votes WHERE current_hash = $1') {
+                return { rows: [ballot] };
+            }
+            if (query === 'SELECT * FROM votes WHERE vote_id < $1 ORDER BY vote_id DESC LIMIT 1') {
+                return { rows: [] };
+            }
+            throw new Error(`Unexpected query: ${query}`);
+        }
+    }));
+    const baseUrl = await listen(t, app);
+    const response = await fetch(`${baseUrl}/api/votes/verify/${ballot.current_hash}`);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+        verified: true,
+        intact: true,
+        timestamp: ballot.vote_timestamp,
+        block_index: ballot.vote_id
+    });
 });
 
 test('vote-chain verification rejects unauthenticated and non-admin requests', async t => {

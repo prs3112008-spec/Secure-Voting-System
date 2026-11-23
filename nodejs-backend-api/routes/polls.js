@@ -54,7 +54,7 @@ router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema
             `, [poll_id]),
             pool.query(`
                 SELECT
-                    (SELECT COUNT(*) FROM votes WHERE poll_id = $1) AS total_votes_cast,
+                    (SELECT COUNT(*) FROM voter_turnout WHERE poll_id = $1) AS total_votes_cast,
                     (SELECT COUNT(*) FROM users WHERE role IS DISTINCT FROM 'admin' AND is_approved IS TRUE) AS approved_voters
             `, [poll_id])
         ]);

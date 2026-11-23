@@ -1,10 +1,11 @@
 const express = require('express');
+const crypto = require('crypto');
 const sharedPool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
-const { generateHash, verifyVoteChain } = require('../utils/voteChain');
+const { buildVoteHashInput, generateHash, verifyVoteChain } = require('../utils/voteChain');
 const validate = require('../middleware/validate');
 const {
     pollIdParamsSchema,
@@ -96,12 +97,12 @@ router.post('/cast', verifyToken, requireVoter, rateLimiters.voter, validate(vot
         }
 
         // 1. THE DOUBLE-VOTE GUARD
-        const existingVote = await client.query(
-            'SELECT * FROM votes WHERE poll_id = $1 AND voter_id = $2',
+        const existingTurnout = await client.query(
+            'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2',
             [poll_id, user_id]
         );
 
-        if (existingVote.rows.length > 0) {
+        if (existingTurnout.rows.length > 0) {
             return res.status(409).json({ error: 'You have already voted in this poll' });
         }
 
@@ -114,17 +115,26 @@ router.post('/cast', verifyToken, requireVoter, rateLimiters.voter, validate(vot
         const previous_hash = lastVote.rows.length > 0 ? lastVote.rows[0].current_hash : '0';
 
         // 3. BLOCKCHAIN LOGIC: Hash the persisted vote data so it can be verified later
-        const voteDataString = `${poll_id}-${candidate_id}-${user_id}-${previous_hash}`;
-        const current_hash = generateHash(voteDataString);
+        const ballot_nonce = crypto.randomBytes(32).toString('hex');
+        const current_hash = generateHash(buildVoteHashInput({
+            poll_id,
+            candidate_id,
+            ballot_nonce,
+            previous_hash
+        }));
 
         if (!consumeVerificationToken(verification_token, user_id)) {
             return res.status(403).json({ error: 'A valid face verification token is required.' });
         }
 
-        // 4. RECORD THE SECURE VOTE
+        // 4. Record participation separately from the anonymous ballot.
         await client.query(
-            'INSERT INTO votes (poll_id, candidate_id, voter_id, previous_hash, current_hash) VALUES ($1, $2, $3, $4, $5)',
-            [poll_id, candidate_id, user_id, previous_hash, current_hash]
+            'INSERT INTO voter_turnout (poll_id, voter_id) VALUES ($1, $2)',
+            [poll_id, user_id]
+        );
+        await client.query(
+            'INSERT INTO votes (poll_id, candidate_id, ballot_nonce, previous_hash, current_hash) VALUES ($1, $2, $3, $4, $5)',
+            [poll_id, candidate_id, ballot_nonce, previous_hash, current_hash]
         );
         await client.query('COMMIT');
         transactionOpen = false;
@@ -132,7 +142,8 @@ router.post('/cast', verifyToken, requireVoter, rateLimiters.voter, validate(vot
         res.status(201).json({ 
             message: 'Vote cast successfully with blockchain security!',
             hash: current_hash,
-            current_hash: current_hash
+            current_hash: current_hash,
+            receipt_hash: current_hash
         });
     } catch (err) {
         if (transactionOpen) {
@@ -164,7 +175,7 @@ router.post('/cast', verifyToken, requireVoter, rateLimiters.voter, validate(vot
 router.get('/verify/:hash', rateLimiters.public, validate(receiptHashParamsSchema, 'params'), async (req, res, next) => {
     try {
         const result = await pool.query(
-            'SELECT vote_id, poll_id, candidate_id, voter_id, previous_hash, current_hash, vote_timestamp FROM votes WHERE current_hash = $1',
+            'SELECT vote_id, poll_id, candidate_id, ballot_nonce, previous_hash, current_hash, vote_timestamp FROM votes WHERE current_hash = $1',
             [req.params.hash]
         );
 
@@ -183,8 +194,7 @@ router.get('/verify/:hash', rateLimiters.public, validate(receiptHashParamsSchem
         const expectedPreviousHash = previousVote.rows.length > 0
             ? previousVote.rows[0].current_hash
             : '0';
-        const voteDataString = `${vote.poll_id}-${vote.candidate_id}-${vote.voter_id}-${vote.previous_hash}`;
-        const recalculatedHash = generateHash(voteDataString);
+        const recalculatedHash = generateHash(buildVoteHashInput(vote));
         const intact = vote.previous_hash === expectedPreviousHash &&
             recalculatedHash === vote.current_hash;
 
@@ -298,21 +308,12 @@ router.get('/status/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdP
         const user_id = req.user.user_id; // Extracted securely from JWT
 
         // Update the query to also grab the current_hash
-        const existingVote = await pool.query(
-            'SELECT candidate_id, current_hash FROM votes WHERE poll_id = $1 AND voter_id = $2',
+        const existingTurnout = await pool.query(
+            'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2',
             [poll_id, user_id]
         );
 
-        if (existingVote.rows.length > 0) {
-            // Include the hash in the response!
-            res.json({ 
-                hasVoted: true, 
-                candidate_id: existingVote.rows[0].candidate_id,
-                receipt_hash: existingVote.rows[0].current_hash 
-            });
-        } else {
-            res.json({ hasVoted: false });
-        }
+        res.json({ hasVoted: existingTurnout.rows.length > 0 });
     } catch (err) {
         next(err);
     }

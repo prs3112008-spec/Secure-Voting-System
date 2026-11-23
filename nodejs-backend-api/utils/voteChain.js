@@ -2,9 +2,13 @@ const crypto = require('crypto');
 
 const generateHash = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
+function buildVoteHashInput({ poll_id, candidate_id, ballot_nonce, previous_hash }) {
+    return `${poll_id}-${candidate_id}-${ballot_nonce}-${previous_hash}`;
+}
+
 async function verifyVoteChain(pool) {
     const result = await pool.query(
-        'SELECT vote_id, poll_id, candidate_id, voter_id, previous_hash, current_hash FROM votes ORDER BY vote_id ASC'
+        'SELECT vote_id, poll_id, candidate_id, ballot_nonce, previous_hash, current_hash FROM votes ORDER BY vote_id ASC'
     );
     const votes = result.rows;
 
@@ -31,8 +35,7 @@ async function verifyVoteChain(pool) {
             };
         }
 
-        const rawData = `${vote.poll_id}-${vote.candidate_id}-${vote.voter_id}-${vote.previous_hash}`;
-        const recalculatedHash = generateHash(rawData);
+        const recalculatedHash = generateHash(buildVoteHashInput(vote));
 
         if (recalculatedHash !== vote.current_hash) {
             return {
@@ -56,4 +59,4 @@ async function verifyVoteChain(pool) {
     };
 }
 
-module.exports = { generateHash, verifyVoteChain };
+module.exports = { buildVoteHashInput, generateHash, verifyVoteChain };

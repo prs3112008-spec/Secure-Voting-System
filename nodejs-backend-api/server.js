@@ -102,7 +102,7 @@ app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], ver
         const [turnoutResult, candidateResult, chainStatus] = await Promise.all([
             pool.query(`
                 SELECT
-                    (SELECT COUNT(*) FROM votes WHERE poll_id = $1) AS total_votes_cast,
+                    (SELECT COUNT(*) FROM voter_turnout WHERE poll_id = $1) AS total_votes_cast,
                     (SELECT COUNT(*) FROM users WHERE role IS DISTINCT FROM 'admin' AND is_approved IS TRUE) AS approved_voters
             `, [pollId]),
             pool.query(`
