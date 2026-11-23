@@ -1,17 +1,12 @@
 const express = require('express');
 const router = express.Router();
-const { Pool } = require('pg');
+const pool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const rateLimiters = require('../middleware/rateLimits');
 const { logAdminAction } = require('../utils/auditLog');
 const validate = require('../middleware/validate');
 const { pollCreateSchema, pollIdParamsSchema } = require('../middleware/schemas');
-
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
 
 // ROUTE 1: Get all polls (Protected Route - Requires Token)
 router.get('/', verifyToken, rateLimiters.voter, async (req, res, next) => {

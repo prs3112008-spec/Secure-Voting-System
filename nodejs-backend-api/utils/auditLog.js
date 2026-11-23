@@ -1,10 +1,5 @@
-const { Pool } = require('pg');
 const logError = require('./logError');
-
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
+const pool = require('../db/pool');
 
 const initializeAuditLogs = () => pool.query(`
     CREATE TABLE IF NOT EXISTS audit_logs (

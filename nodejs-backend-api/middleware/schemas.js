@@ -81,15 +81,18 @@ const candidateSchema = z.object({
 const voteSchema = z.union([
     z.object({
         candidate_id: positiveId,
-        election_id: positiveId
+        election_id: positiveId,
+        verification_token: z.string().min(1).max(4096)
     }).strict(),
     z.object({
         candidate_id: positiveId,
-        poll_id: positiveId
+        poll_id: positiveId,
+        verification_token: z.string().min(1).max(4096)
     }).strict()
 ]).transform(data => ({
     candidate_id: data.candidate_id,
-    poll_id: data.election_id || data.poll_id
+    poll_id: data.election_id || data.poll_id,
+    verification_token: data.verification_token
 }));
 
 const faceEmbeddingSchema = z.object({

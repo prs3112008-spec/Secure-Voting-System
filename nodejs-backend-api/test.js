@@ -7,12 +7,20 @@ const cors = require('cors');
 const express = require('express');
 const fs = require('node:fs');
 const helmet = require('helmet');
+const jwt = require('jsonwebtoken');
 const os = require('node:os');
 const path = require('node:path');
 const authRouter = require('./routes/auth');
+const candidatesRouter = require('./routes/candidates');
+const votesRouter = require('./routes/votes');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 const getRequiredEnvironment = require('./utils/requiredEnv');
+const verifyToken = require('./middleware/verifyToken');
+const {
+    consumeVerificationToken,
+    issueVerificationToken
+} = require('./utils/verificationToken');
 const validate = require('./middleware/validate');
 const {
     candidateIdParamsSchema,
@@ -216,14 +224,95 @@ test('failed logins back off by account and successful login resets the backoff'
     assert.equal(afterReset.headers.get('retry-after'), '1');
 });
 
-test('strict schemas validate candidate, vote, and receipt inputs', async t => {
-    assert.deepEqual(voteSchema.parse({ candidate_id: 3, election_id: 9 }), {
-        candidate_id: 3,
-        poll_id: 9
+test('face-enrollment tokens are rejected by normal protected routes', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
     });
-    assert.deepEqual(voteSchema.parse({ candidate_id: '3', election_id: '9' }), {
+
+    const app = express();
+    app.get('/protected', verifyToken, (req, res) => res.sendStatus(204));
+    app.get('/register-face', verifyToken.allowFaceEnroll, (req, res) => res.sendStatus(204));
+    const baseUrl = await listen(t, app);
+    const enrollToken = jwt.sign(
+        { user_id: 7, role: 'voter', scope: 'face_enroll' },
+        process.env.JWT_SECRET,
+        { expiresIn: '10m' }
+    );
+    const headers = { Authorization: `Bearer ${enrollToken}` };
+
+    assert.equal((await fetch(`${baseUrl}/protected`, { headers })).status, 403);
+    assert.equal((await fetch(`${baseUrl}/register-face`, { headers })).status, 204);
+});
+
+test('face verification returns a short-lived single-use token without exposing embeddings', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const embedding = Array(192).fill(0);
+    const fakePool = {
+        async query() {
+            return { rowCount: 1, rows: [{ face_embedding: embedding }] };
+        }
+    };
+    const app = express();
+    app.use(express.json());
+    app.use('/api/auth', authRouter.createAuthRouter(fakePool, createRateLimiters(config())));
+    app.use(notFound);
+    const baseUrl = await listen(t, app);
+    const accessToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const headers = {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json'
+    };
+    const response = await fetch(`${baseUrl}/api/auth/verify-face`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ face_embedding: embedding })
+    });
+
+    assert.equal(response.status, 200);
+    const { verification_token } = await response.json();
+    const payload = jwt.verify(verification_token, process.env.JWT_SECRET);
+    assert.equal(payload.scope, 'vote_verify');
+    assert.equal(payload.userId, 7);
+    assert.ok(payload.jti);
+    assert.ok(payload.exp - payload.iat <= 120);
+    assert.equal(consumeVerificationToken(verification_token, 7), true);
+    assert.equal(consumeVerificationToken(verification_token, 7), false);
+
+    const exposedEmbedding = await fetch(`${baseUrl}/api/auth/face-embedding`, { headers });
+    assert.equal(exposedEmbedding.status, 404);
+});
+
+test('strict schemas validate candidate, vote, and receipt inputs', async t => {
+    assert.deepEqual(voteSchema.parse({
         candidate_id: 3,
-        poll_id: 9
+        election_id: 9,
+        verification_token: 'signed-token'
+    }), {
+        candidate_id: 3,
+        poll_id: 9,
+        verification_token: 'signed-token'
+    });
+    assert.deepEqual(voteSchema.parse({
+        candidate_id: '3',
+        election_id: '9',
+        verification_token: 'signed-token'
+    }), {
+        candidate_id: 3,
+        poll_id: 9,
+        verification_token: 'signed-token'
     });
     assert.deepEqual(candidateSchema.parse({
         name: 'Jordan Lee',
@@ -282,8 +371,13 @@ test('strict schemas validate candidate, vote, and receipt inputs', async t => {
     }).success, false);
     assert.equal(voteSchema.safeParse({
         candidate_id: '3',
-        election_id: 9
+        election_id: 9,
+        verification_token: 'signed-token'
     }).success, true);
+    assert.equal(voteSchema.safeParse({
+        candidate_id: 3,
+        election_id: 9
+    }).success, false);
     assert.equal(receiptHashParamsSchema.safeParse({ hash: 'g'.repeat(64) }).success, false);
 
     const app = express();
@@ -336,15 +430,28 @@ test('strict schemas validate candidate, vote, and receipt inputs', async t => {
     const validVote = await fetch(`${baseUrl}/api/votes/cast`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate_id: 3, election_id: 9 })
+        body: JSON.stringify({
+            candidate_id: 3,
+            election_id: 9,
+            verification_token: 'signed-token'
+        })
     });
     assert.equal(validVote.status, 200);
-    assert.deepEqual(await validVote.json(), { candidate_id: 3, poll_id: 9 });
+    assert.deepEqual(await validVote.json(), {
+        candidate_id: 3,
+        poll_id: 9,
+        verification_token: 'signed-token'
+    });
 
     const invalidVote = await fetch(`${baseUrl}/api/votes/cast`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate_id: 3, election_id: 9, extra: true })
+        body: JSON.stringify({
+            candidate_id: 3,
+            election_id: 9,
+            verification_token: 'signed-token',
+            extra: true
+        })
     });
     assert.equal(invalidVote.status, 400);
     const invalidVoteBody = await invalidVote.json();
@@ -358,6 +465,180 @@ test('strict schemas validate candidate, vote, and receipt inputs', async t => {
     assert.equal((await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(65)}`)).status, 400);
     assert.equal((await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(1024)}`)).status, 400);
     assert.equal((await fetch(`${baseUrl}/api/votes/verify/${'a'.repeat(64)}`)).status, 204);
+});
+
+test('vote casting requires a verification token before accessing the database', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api/votes', votesRouter.createVotesRouter({
+        async connect() {
+            throw new Error('Database should not be reached for invalid input.');
+        }
+    }));
+    const baseUrl = await listen(t, app);
+    const accessToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const response = await fetch(`${baseUrl}/api/votes/cast`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ candidate_id: 3, poll_id: 9 })
+    });
+
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error, 'Validation failed');
+});
+
+test('vote casting serializes ledger writes and maps unique conflicts to 409', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const queries = [];
+    let released = 0;
+    let failInsert = false;
+    const fakePool = {
+        async connect() {
+            return {
+                async query(query) {
+                    queries.push(query);
+                    if (query === 'SELECT start_time, end_time, is_active FROM polls WHERE poll_id = $1') {
+                        return {
+                            rows: [{
+                                start_time: new Date(Date.now() - 60_000),
+                                end_time: new Date(Date.now() + 60_000),
+                                is_active: true
+                            }]
+                        };
+                    }
+                    if (query === 'SELECT 1 FROM candidates WHERE candidate_id = $1 AND poll_id = $2') {
+                        return { rows: [{}] };
+                    }
+                    if (query === 'SELECT role, is_approved FROM users WHERE user_id = $1') {
+                        return { rows: [{ role: 'voter', is_approved: true }] };
+                    }
+                    if (query === 'SELECT * FROM votes WHERE poll_id = $1 AND voter_id = $2') {
+                        return { rows: [] };
+                    }
+                    if (query === 'SELECT current_hash FROM votes ORDER BY vote_id DESC LIMIT 1') {
+                        return { rows: [] };
+                    }
+                    if (query.startsWith('INSERT INTO votes') && failInsert) {
+                        const error = new Error('duplicate vote');
+                        error.code = '23505';
+                        throw error;
+                    }
+                    return { rows: [] };
+                },
+                release() {
+                    released += 1;
+                }
+            };
+        }
+    };
+    const app = express();
+    app.use(express.json());
+    app.use('/api/votes', votesRouter.createVotesRouter(fakePool));
+    const baseUrl = await listen(t, app);
+    const accessToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const castVote = verificationToken => fetch(`${baseUrl}/api/votes/cast`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ candidate_id: 3, poll_id: 9, verification_token: verificationToken })
+    });
+    const success = await castVote(issueVerificationToken(7));
+
+    assert.equal(success.status, 201);
+    const lockIndex = queries.indexOf('SELECT pg_advisory_xact_lock(1247112202)');
+    const duplicateCheckIndex = queries.indexOf('SELECT * FROM votes WHERE poll_id = $1 AND voter_id = $2');
+    const latestHashIndex = queries.indexOf('SELECT current_hash FROM votes ORDER BY vote_id DESC LIMIT 1');
+    const insertIndex = queries.findIndex(query => query.startsWith('INSERT INTO votes'));
+    assert.ok(queries.indexOf('BEGIN') < lockIndex);
+    assert.ok(lockIndex < duplicateCheckIndex);
+    assert.ok(duplicateCheckIndex < latestHashIndex);
+    assert.ok(latestHashIndex < insertIndex);
+    assert.ok(insertIndex < queries.indexOf('COMMIT'));
+
+    failInsert = true;
+    const conflict = await castVote(issueVerificationToken(7));
+    assert.equal(conflict.status, 409);
+    assert.deepEqual(await conflict.json(), { error: 'You have already voted in this poll' });
+    assert.equal(queries.includes('ROLLBACK'), true);
+    assert.equal(released, 2);
+});
+
+test('candidate deletion returns conflict when votes exist', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const queries = [];
+    let released = false;
+    const fakePool = {
+        async connect() {
+            return {
+                async query(query) {
+                    queries.push(query);
+                    if (query === 'SELECT candidate_id FROM candidates WHERE candidate_id = $1 FOR UPDATE') {
+                        return { rowCount: 1, rows: [{ candidate_id: 3 }] };
+                    }
+                    if (query === 'SELECT COUNT(*) AS vote_count FROM votes WHERE candidate_id = $1') {
+                        return { rowCount: 1, rows: [{ vote_count: '1' }] };
+                    }
+                    return { rowCount: 0, rows: [] };
+                },
+                release() {
+                    released = true;
+                }
+            };
+        }
+    };
+    const app = express();
+    app.use('/api/candidates', candidatesRouter.createCandidatesRouter(fakePool));
+    const baseUrl = await listen(t, app);
+    const adminToken = jwt.sign(
+        { user_id: 99, role: 'admin' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+
+    const response = await fetch(`${baseUrl}/api/candidates/3`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${adminToken}` }
+    });
+
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+        error: 'Cannot delete candidate with existing votes'
+    });
+    assert.equal(queries.includes('DELETE FROM votes WHERE candidate_id = $1'), false);
+    assert.equal(queries.includes('ROLLBACK'), true);
+    assert.equal(released, true);
 });
 
 test('public endpoints are rate limited using configured moderate thresholds', async t => {

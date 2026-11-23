@@ -1,6 +1,5 @@
 const express = require('express');
-const router = express.Router();
-const { Pool } = require('pg');
+const sharedPool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const rateLimiters = require('../middleware/rateLimits');
@@ -9,10 +8,8 @@ const validate = require('../middleware/validate');
 const { candidateIdParamsSchema, candidateSchema, pollIdParamsSchema } = require('../middleware/schemas');
 const logError = require('../utils/logError');
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
+function createCandidatesRouter(pool = sharedPool) {
+const router = express.Router();
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
 router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateSchema), async (req, res, next) => {
@@ -36,24 +33,47 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
     }
 });
 
-// ROUTE 2: Delete a candidate and their votes (Protected - Admins Only)
+// ROUTE 2: Delete a candidate only when it has no votes (Protected - Admins Only)
 router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateIdParamsSchema, 'params'), async (req, res, next) => {
     let client;
+    let transactionOpen = false;
 
     try {
         const { candidate_id } = req.params;
         client = await pool.connect();
         await client.query('BEGIN');
-        await client.query('DELETE FROM votes WHERE candidate_id = $1', [candidate_id]);
+        transactionOpen = true;
+        const candidate = await client.query(
+            'SELECT candidate_id FROM candidates WHERE candidate_id = $1 FOR UPDATE',
+            [candidate_id]
+        );
+        if (candidate.rowCount === 0) {
+            await client.query('ROLLBACK');
+            transactionOpen = false;
+            return res.status(404).json({ error: 'Candidate not found.' });
+        }
+
+        const votes = await client.query(
+            'SELECT COUNT(*) AS vote_count FROM votes WHERE candidate_id = $1',
+            [candidate_id]
+        );
+        if (Number(votes.rows[0].vote_count) > 0) {
+            await client.query('ROLLBACK');
+            transactionOpen = false;
+            return res.status(409).json({ error: 'Cannot delete candidate with existing votes' });
+        }
+
         await client.query('DELETE FROM candidates WHERE candidate_id = $1', [candidate_id]);
         await client.query('COMMIT');
+        transactionOpen = false;
 
         await logAdminAction(req.user, 'DELETE_CANDIDATE', JSON.stringify({ candidate_id }));
         res.json({ message: 'Candidate deleted successfully!' });
     } catch (err) {
-        if (client) {
+        if (client && transactionOpen) {
             try {
                 await client.query('ROLLBACK');
+                transactionOpen = false;
             } catch (rollbackErr) {
                 logError('Candidate deletion rollback failed', rollbackErr);
             }
@@ -61,6 +81,13 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, va
         next(err);
     } finally {
         if (client) {
+            if (transactionOpen) {
+                try {
+                    await client.query('ROLLBACK');
+                } catch (rollbackErr) {
+                    logError('Candidate deletion rollback failed', rollbackErr);
+                }
+            }
             client.release();
         }
     }
@@ -87,5 +114,11 @@ router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSc
         next(err);
     }
 });
+
+return router;
+}
+
+const router = createCandidatesRouter();
+router.createCandidatesRouter = createCandidatesRouter;
 
 module.exports = router;

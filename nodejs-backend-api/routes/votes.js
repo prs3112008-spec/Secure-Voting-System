@@ -1,6 +1,5 @@
 const express = require('express');
-const router = express.Router();
-const { Pool } = require('pg');
+const sharedPool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const rateLimiters = require('../middleware/rateLimits');
@@ -13,17 +12,33 @@ const {
     scheduleSchema,
     voteSchema
 } = require('../middleware/schemas');
+const logError = require('../utils/logError');
+const {
+    consumeVerificationToken,
+    verifyVerificationToken
+} = require('../utils/verificationToken');
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
+function createVotesRouter(pool = sharedPool) {
+const router = express.Router();
 
 // ROUTE: Cast a vote (Protected - Any Logged-in User)
 router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), async (req, res, next) => {
+    let client;
+    let transactionOpen = false;
+
     try {
-        const { poll_id, candidate_id } = req.body;
-        const pollCheck = await pool.query(
+        const { poll_id, candidate_id, verification_token } = req.body;
+        const user_id = req.user.user_id;
+        if (!verifyVerificationToken(verification_token, user_id)) {
+            return res.status(403).json({ error: 'A valid face verification token is required.' });
+        }
+
+        client = await pool.connect();
+        await client.query('BEGIN');
+        transactionOpen = true;
+        await client.query('SELECT pg_advisory_xact_lock(1247112202)');
+
+        const pollCheck = await client.query(
             'SELECT start_time, end_time, is_active FROM polls WHERE poll_id = $1',
             [poll_id]
         );
@@ -32,7 +47,7 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
             return res.status(404).json({ error: 'Poll not found.' });
         }
 
-        const candidateCheck = await pool.query(
+        const candidateCheck = await client.query(
             'SELECT 1 FROM candidates WHERE candidate_id = $1 AND poll_id = $2',
             [candidate_id, poll_id]
         );
@@ -54,8 +69,7 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
             return res.status(403).json({ error: 'Voting is currently closed for this election.' });
         }
 
-        const user_id = req.user.user_id;
-        const userCheck = await pool.query(
+        const userCheck = await client.query(
             'SELECT role, is_approved FROM users WHERE user_id = $1',
             [user_id]
         );
@@ -75,17 +89,17 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
         }
 
         // 1. THE DOUBLE-VOTE GUARD
-        const existingVote = await pool.query(
+        const existingVote = await client.query(
             'SELECT * FROM votes WHERE poll_id = $1 AND voter_id = $2',
             [poll_id, user_id]
         );
 
         if (existingVote.rows.length > 0) {
-            return res.status(403).json({ error: 'Access Denied. You have already voted in this poll!' });
+            return res.status(409).json({ error: 'You have already voted in this poll' });
         }
 
         // 2. BLOCKCHAIN LOGIC: Fetch the previous hash
-        const lastVote = await pool.query(
+        const lastVote = await client.query(
             'SELECT current_hash FROM votes ORDER BY vote_id DESC LIMIT 1'
         );
         
@@ -96,11 +110,17 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
         const voteDataString = `${poll_id}-${candidate_id}-${user_id}-${previous_hash}`;
         const current_hash = generateHash(voteDataString);
 
+        if (!consumeVerificationToken(verification_token, user_id)) {
+            return res.status(403).json({ error: 'A valid face verification token is required.' });
+        }
+
         // 4. RECORD THE SECURE VOTE
-        await pool.query(
+        await client.query(
             'INSERT INTO votes (poll_id, candidate_id, voter_id, previous_hash, current_hash) VALUES ($1, $2, $3, $4, $5)',
             [poll_id, candidate_id, user_id, previous_hash, current_hash]
         );
+        await client.query('COMMIT');
+        transactionOpen = false;
 
         res.status(201).json({ 
             message: 'Vote cast successfully with blockchain security!',
@@ -108,7 +128,28 @@ router.post('/cast', verifyToken, rateLimiters.voter, validate(voteSchema), asyn
             current_hash: current_hash
         });
     } catch (err) {
+        if (transactionOpen) {
+            try {
+                await client.query('ROLLBACK');
+                transactionOpen = false;
+            } catch (rollbackErr) {
+                logError('Vote casting rollback failed', rollbackErr);
+            }
+        }
+
+        if (err.code === '23505') {
+            return res.status(409).json({ error: 'You have already voted in this poll' });
+        }
         next(err);
+    } finally {
+        if (transactionOpen) {
+            try {
+                await client.query('ROLLBACK');
+            } catch (rollbackErr) {
+                logError('Vote casting rollback failed', rollbackErr);
+            }
+        }
+        if (client) client.release();
     }
 });
 
@@ -285,5 +326,11 @@ router.get('/status/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdP
         next(err);
     }
 });
+
+return router;
+}
+
+const router = createVotesRouter();
+router.createVotesRouter = createVotesRouter;
 
 module.exports = router;

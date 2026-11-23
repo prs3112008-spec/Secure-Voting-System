@@ -1,18 +1,15 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { Pool } = require('pg');
+const defaultPool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const rateLimiters = require('../middleware/rateLimits');
 const { setRateLimitResponse } = rateLimiters;
 const validate = require('../middleware/validate');
 const { faceEmbeddingSchema, loginSchema, registerSchema } = require('../middleware/schemas');
 const logError = require('../utils/logError');
-
-const defaultPool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
+const { euclideanDistance, FACE_MATCH_THRESHOLD, parseStoredEmbedding } = require('../utils/faceEmbedding');
+const { issueVerificationToken } = require('../utils/verificationToken');
 
 function createLoginBackoff(config) {
     const accounts = new Map();
@@ -97,9 +94,16 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
                 "INSERT INTO users (full_name, email, mobile_no, password_hash, role, is_approved) VALUES ($1, $2, $3, $4, 'voter', FALSE) RETURNING user_id, full_name, email, role, is_approved",
                 [full_name, email, mobile_no, password_hash]
             );
+            const user = newUser.rows[0];
+            const enroll_token = jwt.sign(
+                { user_id: user.user_id, role: user.role, scope: 'face_enroll' },
+                process.env.JWT_SECRET,
+                { expiresIn: '10m' }
+            );
             res.status(201).json({
                 message: 'Registration successful! Wait for admin approval.',
-                user: newUser.rows[0]
+                user,
+                enroll_token
             });
         } catch (err) {
             next(err);
@@ -141,7 +145,7 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
         }
     });
 
-    router.post('/register-face', verifyToken, limits.voter, validate(faceEmbeddingSchema), async (req, res, next) => {
+    router.post('/register-face', verifyToken.allowFaceEnroll, limits.voter, validate(faceEmbeddingSchema), async (req, res, next) => {
         const { face_embedding } = req.body;
 
         let client;
@@ -157,20 +161,8 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
                 [req.user.user_id]
             );
             for (const row of existingUsers.rows) {
-                let storedEmbedding = row.face_embedding;
-                if (typeof storedEmbedding === 'string') {
-                    storedEmbedding = JSON.parse(storedEmbedding);
-                }
-                if (!Array.isArray(storedEmbedding) || storedEmbedding.length !== face_embedding.length ||
-                    !storedEmbedding.every(value => typeof value === 'number' && Number.isFinite(value))) {
-                    throw new Error('Stored face embedding is invalid.');
-                }
-
-                const squaredDistance = face_embedding.reduce((sum, value, index) => {
-                    const difference = value - storedEmbedding[index];
-                    return sum + difference * difference;
-                }, 0);
-                if (Math.sqrt(squaredDistance) < 0.90) {
+                const storedEmbedding = parseStoredEmbedding(row.face_embedding);
+                if (euclideanDistance(face_embedding, storedEmbedding) < FACE_MATCH_THRESHOLD) {
                     await client.query('ROLLBACK');
                     transactionStarted = false;
                     return res.status(409).json({ error: 'This face is already registered to another voter account.' });
@@ -204,7 +196,7 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
         }
     });
 
-    router.get('/face-embedding', verifyToken, limits.voter, async (req, res, next) => {
+    router.post('/verify-face', verifyToken, limits.voter, validate(faceEmbeddingSchema), async (req, res, next) => {
         try {
             const result = await pool.query(
                 'SELECT face_embedding FROM users WHERE user_id = $1',
@@ -212,7 +204,19 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
             );
             if (result.rowCount === 0) return res.status(404).json({ error: 'User not found.' });
 
-            res.status(200).json({ face_embedding: result.rows[0].face_embedding });
+            if (result.rows[0].face_embedding === null) {
+                return res.status(403).json({ error: 'Face has not been registered.' });
+            }
+
+            const storedEmbedding = parseStoredEmbedding(result.rows[0].face_embedding);
+            const distance = euclideanDistance(req.body.face_embedding, storedEmbedding);
+            if (distance >= FACE_MATCH_THRESHOLD) {
+                return res.status(401).json({ error: 'Face verification failed.' });
+            }
+
+            res.status(200).json({
+                verification_token: issueVerificationToken(req.user.user_id)
+            });
         } catch (err) {
             next(err);
         }

@@ -3,7 +3,7 @@ require('./utils/requiredEnv')();
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
-const { Pool } = require('pg');
+const pool = require('./db/pool');
 const { initializeAuditLogs, logAdminAction, getLatestAuditLogs } = require('./utils/auditLog');
 const { verifyVoteChain } = require('./utils/voteChain');
 const logError = require('./utils/logError');
@@ -22,12 +22,6 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/polls', require('./routes/polls'));
 app.use('/api/candidates', require('./routes/candidates'));
 app.use('/api/votes', require('./routes/votes'));
-
-// Connect to Supabase
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false }
-});
 
 // Test the connection
 pool.connect((err, client, release) => {
@@ -175,25 +169,11 @@ app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], ver
     }
 });
 
-// A simple test route
 app.get('/', (req, res) => {
     res.send('Secure Voting API is running!');
 });
 
 const PORT = process.env.PORT || 5000;
-// Test the connection
-pool.connect((err, client, release) => {
-    if (err) {
-        return logError('Database connection failed', err);
-    }
-    console.log('Successfully connected to the Secure Voting Database!');
-    release();
-});
-
-// A simple test route
-app.get('/', (req, res) => {
-    res.send('Secure Voting API is running!');
-});
 
 app.use(notFound);
 app.use(errorHandler);
