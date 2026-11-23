@@ -1,6 +1,5 @@
 const express = require('express');
-const router = express.Router();
-const pool = require('../db/pool');
+const sharedPool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
 const rateLimiters = require('../middleware/rateLimits');
@@ -8,11 +7,42 @@ const { logAdminAction } = require('../utils/auditLog');
 const validate = require('../middleware/validate');
 const { pollCreateSchema, pollIdParamsSchema } = require('../middleware/schemas');
 
+function createPollsRouter(pool = sharedPool, logAction = logAdminAction) {
+const router = express.Router();
+
 // ROUTE 1: Get all polls (Protected Route - Requires Token)
 router.get('/', verifyToken, rateLimiters.voter, async (req, res, next) => {
     try {
-        const allPolls = await pool.query('SELECT * FROM polls ORDER BY start_time DESC');
-        res.json(allPolls.rows);
+        const allPolls = await pool.query(`
+            SELECT
+                p.poll_id,
+                p.title,
+                p.description,
+                p.start_time,
+                p.end_time,
+                COALESCE(p.is_active, TRUE) AS is_active,
+                COALESCE(p.is_private, FALSE) AS is_private,
+                COUNT(DISTINCT c.candidate_id)::int AS candidate_count,
+                EXISTS (
+                    SELECT 1 FROM voter_turnout vt
+                    WHERE vt.poll_id = p.poll_id AND vt.voter_id = $1
+                ) AS has_voted
+            FROM polls p
+            LEFT JOIN candidates c ON c.poll_id = p.poll_id
+            GROUP BY p.poll_id
+            ORDER BY p.poll_id DESC
+        `, [req.user.user_id]);
+        const now = new Date();
+        res.json(allPolls.rows.map(poll => {
+            const startTime = new Date(poll.start_time);
+            const endTime = new Date(poll.end_time);
+            const status = !poll.is_active || now > endTime
+                ? 'CLOSED'
+                : now < startTime
+                    ? 'UPCOMING'
+                    : 'LIVE';
+            return { ...poll, status };
+        }));
     } catch (err) {
         next(err);
     }
@@ -24,11 +54,11 @@ router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(po
         const { title, description, start_time, end_time, is_private, security_code } = req.body;
         
         const newPoll = await pool.query(
-            'INSERT INTO polls (title, description, start_time, end_time, is_private, security_code, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
+            'INSERT INTO polls (title, description, start_time, end_time, is_active, is_private, security_code, created_by) VALUES ($1, $2, $3, $4, TRUE, COALESCE($5, FALSE), $6, $7) RETURNING poll_id, title, description, start_time, end_time, is_private, created_by, is_active',
             [title, description, start_time, end_time, is_private, security_code, req.user.user_id] // Notice req.user.user_id comes securely from the token!
         );
 
-        await logAdminAction(req.user, 'CREATE_POLL', JSON.stringify({
+        await logAction(req.user, 'CREATE_POLL', JSON.stringify({
             poll_id: newPoll.rows[0].poll_id,
             title: newPoll.rows[0].title
         }));
@@ -77,5 +107,11 @@ router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema
         next(err);
     }
 });
+
+return router;
+}
+
+const router = createPollsRouter();
+router.createPollsRouter = createPollsRouter;
 
 module.exports = router;

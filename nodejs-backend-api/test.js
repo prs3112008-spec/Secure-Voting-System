@@ -12,6 +12,7 @@ const os = require('node:os');
 const path = require('node:path');
 const authRouter = require('./routes/auth');
 const candidatesRouter = require('./routes/candidates');
+const pollsRouter = require('./routes/polls');
 const votesRouter = require('./routes/votes');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
@@ -911,6 +912,320 @@ test('candidate deletion returns conflict when votes exist', async t => {
     assert.equal(queries.includes('DELETE FROM votes WHERE candidate_id = $1'), false);
     assert.equal(queries.includes('ROLLBACK'), true);
     assert.equal(released, true);
+});
+
+test('poll APIs keep candidate counts, turnout, and the global chain independent across polls', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const now = Date.now();
+    const poolQueries = [];
+    const state = {
+        polls: [{
+            poll_id: 1,
+            title: 'First Poll',
+            description: 'Existing poll',
+            start_time: new Date(now - 60_000),
+            end_time: new Date(now + 30 * 60_000),
+            is_active: true,
+            is_private: false,
+            security_code: 'first-secret',
+            created_by: 99
+        }],
+        candidates: [{
+            candidate_id: 1,
+            poll_id: 1,
+            candidate_name: 'First Candidate',
+            party: 'Independent',
+            photo_url: 'https://images.example.com/first.jpg'
+        }],
+        turnout: [],
+        votes: [],
+        users: [
+            { user_id: 7, role: 'voter', is_approved: true },
+            { user_id: 99, role: 'admin', is_approved: true }
+        ],
+        nextPollId: 2,
+        nextCandidateId: 2,
+        nextVoteId: 1
+    };
+
+    const database = {
+        async query(query, params = []) {
+            poolQueries.push(query);
+            const sql = query.replace(/\s+/g, ' ').trim();
+
+            if (sql.startsWith('SELECT p.poll_id,')) {
+                const userId = params[0];
+                return {
+                    rows: state.polls.map(poll => ({
+                        poll_id: poll.poll_id,
+                        title: poll.title,
+                        description: poll.description,
+                        start_time: poll.start_time,
+                        end_time: poll.end_time,
+                        is_active: poll.is_active === null ? true : poll.is_active,
+                        is_private: poll.is_private === null ? false : poll.is_private,
+                        candidate_count: state.candidates.filter(candidate => candidate.poll_id === poll.poll_id).length,
+                        has_voted: state.turnout.some(turnout =>
+                            turnout.poll_id === poll.poll_id && turnout.voter_id === userId
+                        )
+                    })).sort((left, right) => right.poll_id - left.poll_id)
+                };
+            }
+
+            if (sql.startsWith('INSERT INTO polls ')) {
+                const [title, description, startTime, endTime, isPrivate, securityCode, createdBy] = params;
+                const poll = {
+                    poll_id: state.nextPollId++,
+                    title,
+                    description,
+                    start_time: startTime,
+                    end_time: endTime,
+                    is_active: true,
+                    is_private: isPrivate === null || isPrivate === undefined ? false : isPrivate,
+                    security_code: securityCode,
+                    created_by: createdBy
+                };
+                state.polls.push(poll);
+                return {
+                    rows: [{
+                        poll_id: poll.poll_id,
+                        title: poll.title,
+                        description: poll.description,
+                        start_time: poll.start_time,
+                        end_time: poll.end_time,
+                        is_private: poll.is_private,
+                        created_by: poll.created_by,
+                        is_active: poll.is_active
+                    }]
+                };
+            }
+
+            if (sql.startsWith('INSERT INTO candidates ')) {
+                const [pollId, name, party, photoUrl] = params;
+                const candidate = {
+                    candidate_id: state.nextCandidateId++,
+                    poll_id: pollId,
+                    candidate_name: name,
+                    party,
+                    photo_url: photoUrl
+                };
+                state.candidates.push(candidate);
+                return { rows: [candidate] };
+            }
+
+            if (sql.startsWith('SELECT c.candidate_id, c.candidate_name, c.party, c.photo_url, COUNT(v.vote_id)')) {
+                const pollId = Number(params[0]);
+                return {
+                    rows: state.candidates
+                        .filter(candidate => candidate.poll_id === pollId)
+                        .map(candidate => ({
+                            candidate_id: candidate.candidate_id,
+                            candidate_name: candidate.candidate_name,
+                            party: candidate.party,
+                            photo_url: candidate.photo_url,
+                            vote_count: String(state.votes.filter(vote =>
+                                vote.candidate_id === candidate.candidate_id &&
+                                vote.poll_id === candidate.poll_id
+                            ).length)
+                        }))
+                };
+            }
+
+            if (sql.includes('(SELECT COUNT(*) FROM voter_turnout WHERE poll_id = $1)')) {
+                const pollId = Number(params[0]);
+                return {
+                    rows: [{
+                        total_votes_cast: String(state.turnout.filter(row => row.poll_id === pollId).length),
+                        approved_voters: String(state.users.filter(user =>
+                            user.role !== 'admin' && user.is_approved === true
+                        ).length)
+                    }]
+                };
+            }
+
+            if (sql === 'SELECT vote_id, poll_id, candidate_id, ballot_nonce, previous_hash, current_hash FROM votes ORDER BY vote_id ASC') {
+                return { rows: [...state.votes].sort((left, right) => left.vote_id - right.vote_id) };
+            }
+
+            throw new Error(`Unexpected pool query: ${sql}`);
+        },
+        async connect() {
+            return {
+                async query(query, params = []) {
+                    poolQueries.push(query);
+                    const sql = query.replace(/\s+/g, ' ').trim();
+
+                    if (sql === 'BEGIN' || sql === 'COMMIT' || sql === 'ROLLBACK' ||
+                        sql === 'SELECT pg_advisory_xact_lock(1247112202)') {
+                        return { rows: [] };
+                    }
+                    if (sql === 'SELECT start_time, end_time, is_active FROM polls WHERE poll_id = $1') {
+                        const poll = state.polls.find(item => item.poll_id === params[0]);
+                        return { rows: poll ? [poll] : [] };
+                    }
+                    if (sql === 'SELECT 1 FROM candidates WHERE candidate_id = $1 AND poll_id = $2') {
+                        return {
+                            rows: state.candidates.some(candidate =>
+                                candidate.candidate_id === params[0] && candidate.poll_id === params[1]
+                            ) ? [{}] : []
+                        };
+                    }
+                    if (sql === 'SELECT role, is_approved FROM users WHERE user_id = $1') {
+                        const user = state.users.find(item => item.user_id === params[0]);
+                        return { rows: user ? [user] : [] };
+                    }
+                    if (sql === 'SELECT 1 FROM voter_turnout WHERE poll_id = $1 AND voter_id = $2') {
+                        return {
+                            rows: state.turnout.some(row => row.poll_id === params[0] && row.voter_id === params[1])
+                                ? [{}]
+                                : []
+                        };
+                    }
+                    if (sql === 'SELECT current_hash FROM votes ORDER BY vote_id DESC LIMIT 1') {
+                        const latestVote = state.votes[state.votes.length - 1];
+                        return { rows: latestVote ? [{ current_hash: latestVote.current_hash }] : [] };
+                    }
+                    if (sql === 'INSERT INTO voter_turnout (poll_id, voter_id) VALUES ($1, $2)') {
+                        state.turnout.push({ poll_id: params[0], voter_id: params[1] });
+                        return { rows: [] };
+                    }
+                    if (sql.startsWith('INSERT INTO votes ')) {
+                        const [pollId, candidateId, ballotNonce, previousHash, currentHash] = params;
+                        state.votes.push({
+                            vote_id: state.nextVoteId++,
+                            poll_id: pollId,
+                            candidate_id: candidateId,
+                            ballot_nonce: ballotNonce,
+                            previous_hash: previousHash,
+                            current_hash: currentHash,
+                            vote_timestamp: new Date()
+                        });
+                        return { rows: [] };
+                    }
+
+                    throw new Error(`Unexpected client query: ${sql}`);
+                },
+                release() {}
+            };
+        }
+    };
+
+    const app = express();
+    app.set('trust proxy', 1);
+    app.use(express.json());
+    app.use('/api/polls', pollsRouter.createPollsRouter(database, async () => {}));
+    app.use('/api/candidates', candidatesRouter.createCandidatesRouter(database, async () => {}));
+    app.use('/api/votes', votesRouter.createVotesRouter(database));
+    const baseUrl = await listen(t, app);
+    const adminToken = jwt.sign(
+        { user_id: 99, role: 'admin' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+    const voterToken = jwt.sign(
+        { user_id: 7, role: 'voter' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+
+    const createPollQuery = {
+        title: 'Second Poll',
+        description: 'Independent second election',
+        start_time: new Date(Date.now() - 60_000).toISOString(),
+        end_time: new Date(Date.now() + 30 * 60_000).toISOString(),
+        is_private: false,
+        security_code: 'second-secret'
+    };
+    const createPollResponse = await fetch(`${baseUrl}/api/polls/create`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(createPollQuery)
+    });
+    assert.equal(createPollResponse.status, 201);
+    const createdPoll = await createPollResponse.json();
+    assert.equal(createdPoll.poll.poll_id, 2);
+    assert.equal(createdPoll.poll.is_active, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(createdPoll.poll, 'security_code'), false);
+
+    const candidateResponse = await fetch(`${baseUrl}/api/candidates/add`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            name: 'Second Poll Candidate',
+            party: 'Civic Party',
+            poll_id: createdPoll.poll.poll_id,
+            photo_url: 'https://images.example.com/second.jpg'
+        })
+    });
+    assert.equal(candidateResponse.status, 201);
+    const createdCandidate = await candidateResponse.json();
+    assert.equal(createdCandidate.poll_id, createdPoll.poll.poll_id);
+
+    const castVote = (pollId, candidateId) => fetch(`${baseUrl}/api/votes/cast`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${voterToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            poll_id: pollId,
+            candidate_id: candidateId,
+            verification_token: issueVerificationToken(7)
+        })
+    });
+    assert.equal((await castVote(1, 1)).status, 201);
+    assert.equal((await castVote(createdPoll.poll.poll_id, createdCandidate.candidate_id)).status, 201);
+
+    const pollListResponse = await fetch(`${baseUrl}/api/polls`, {
+        headers: { Authorization: `Bearer ${voterToken}` }
+    });
+    assert.equal(pollListResponse.status, 200);
+    const pollList = await pollListResponse.json();
+    assert.equal(pollList[0].poll_id, 2);
+    assert.equal(pollList[0].status, 'LIVE');
+    assert.equal(pollList[0].candidate_count, 1);
+    assert.equal(pollList[0].has_voted, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(pollList[0], 'security_code'), false);
+    assert.equal(pollList[1].candidate_count, 1);
+    assert.equal(pollList[1].has_voted, true);
+    assert.equal(Object.prototype.hasOwnProperty.call(pollList[1], 'security_code'), false);
+
+    const pollListSql = poolQueries.find(query => query.includes('FROM polls p'));
+    assert.doesNotMatch(pollListSql, /security_code/i);
+    const insertPollSql = poolQueries.find(query => query.startsWith('INSERT INTO polls'));
+    assert.match(insertPollSql, /TRUE, COALESCE\(\$5, FALSE\)/);
+    assert.match(insertPollSql, /RETURNING poll_id, title, description, start_time, end_time, is_private, created_by, is_active$/);
+    assert.doesNotMatch(insertPollSql.split('RETURNING')[1], /security_code/i);
+
+    for (const pollId of [1, createdPoll.poll.poll_id]) {
+        const resultsResponse = await fetch(`${baseUrl}/api/polls/${pollId}/results`);
+        assert.equal(resultsResponse.status, 200);
+        const results = await resultsResponse.json();
+        assert.equal(results.turnout.total_votes_cast, 1);
+        assert.equal(results.results.length, 1);
+        assert.equal(Number(results.results[0].vote_count), 1);
+    }
+
+    const chainStatus = await verifyVoteChain(database);
+    assert.equal(chainStatus.valid, true);
+    assert.equal(chainStatus.total_votes, 2);
+    assert.equal(state.votes[0].previous_hash, '0');
+    assert.equal(state.votes[1].previous_hash, state.votes[0].current_hash);
+    assert.equal(state.votes.every(vote =>
+        !Object.prototype.hasOwnProperty.call(vote, 'voter_id')
+    ), true);
 });
 
 test('public endpoints are rate limited using configured moderate thresholds', async t => {

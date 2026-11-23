@@ -8,7 +8,7 @@ const validate = require('../middleware/validate');
 const { candidateIdParamsSchema, candidateSchema, pollIdParamsSchema } = require('../middleware/schemas');
 const logError = require('../utils/logError');
 
-function createCandidatesRouter(pool = sharedPool) {
+function createCandidatesRouter(pool = sharedPool, logAction = logAdminAction) {
 const router = express.Router();
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
@@ -22,7 +22,7 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
         );
 
         const candidate = newCandidate.rows[0];
-        await logAdminAction(req.user, 'ADD_CANDIDATE', JSON.stringify({
+        await logAction(req.user, 'ADD_CANDIDATE', JSON.stringify({
             candidate_id: candidate.candidate_id,
             candidate_name: candidate.candidate_name,
             poll_id: candidate.poll_id
@@ -67,7 +67,7 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, va
         await client.query('COMMIT');
         transactionOpen = false;
 
-        await logAdminAction(req.user, 'DELETE_CANDIDATE', JSON.stringify({ candidate_id }));
+        await logAction(req.user, 'DELETE_CANDIDATE', JSON.stringify({ candidate_id }));
         res.json({ message: 'Candidate deleted successfully!' });
     } catch (err) {
         if (client && transactionOpen) {
