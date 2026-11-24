@@ -7,18 +7,26 @@ const { logAdminAction } = require('../utils/auditLog');
 const validate = require('../middleware/validate');
 const { candidateIdParamsSchema, candidateSchema, pollIdParamsSchema } = require('../middleware/schemas');
 const logError = require('../utils/logError');
+const { uploadCandidatePhoto } = require('../utils/cloudinary');
 
-function createCandidatesRouter(pool = sharedPool, logAction = logAdminAction) {
+function createCandidatesRouter(pool = sharedPool, logAction = logAdminAction, uploadPhoto = uploadCandidatePhoto) {
 const router = express.Router();
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
 router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateSchema), async (req, res, next) => {
     try {
         const { poll_id, name, party, photo_url } = req.body;
-        
+        let storedPhotoUrl;
+        try {
+            storedPhotoUrl = await uploadPhoto(photo_url);
+        } catch (err) {
+            logError('Candidate photo upload failed', err);
+            return res.status(502).json({ error: 'Failed to upload candidate photo to cloud storage.' });
+        }
+
         const newCandidate = await pool.query(
             'INSERT INTO candidates (poll_id, candidate_name, party, photo_url) VALUES ($1, $2, $3, $4) RETURNING *',
-            [poll_id || 1, name, party, photo_url]
+            [poll_id || 1, name, party, storedPhotoUrl]
         );
 
         const candidate = newCandidate.rows[0];

@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const childProcess = require('node:child_process');
 const crypto = require('node:crypto');
 const cors = require('cors');
+const cloudinarySdk = require('cloudinary').v2;
 const express = require('express');
 const fs = require('node:fs');
 const helmet = require('helmet');
@@ -16,6 +17,7 @@ const pollsRouter = require('./routes/polls');
 const votesRouter = require('./routes/votes');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
+const { isCloudinaryConfigured, uploadCandidatePhoto } = require('./utils/cloudinary');
 const getRequiredEnvironment = require('./utils/requiredEnv');
 const verifyToken = require('./middleware/verifyToken');
 const {
@@ -912,6 +914,170 @@ test('candidate deletion returns conflict when votes exist', async t => {
     assert.equal(queries.includes('DELETE FROM votes WHERE candidate_id = $1'), false);
     assert.equal(queries.includes('ROLLBACK'), true);
     assert.equal(released, true);
+});
+
+test('Cloudinary photo helper passes through URLs and uploads configured image data', async () => {
+    const envNames = ['CLOUDINARY_CLOUD_NAME', 'CLOUDINARY_API_KEY', 'CLOUDINARY_API_SECRET'];
+    const originalEnv = Object.fromEntries(envNames.map(name => [name, process.env[name]]));
+    const originalUpload = cloudinarySdk.uploader.upload;
+    const photoDataUri = 'data:image/png;base64,dGVzdA==';
+    const cloudinaryUrl = 'https://res.cloudinary.com/example/image/upload/candidate.png';
+    let uploadArguments;
+
+    try {
+        envNames.forEach(name => delete process.env[name]);
+        assert.equal(isCloudinaryConfigured(), false);
+        assert.equal(await uploadCandidatePhoto(photoDataUri), photoDataUri);
+        assert.equal(await uploadCandidatePhoto('https://images.example.com/photo.png'), 'https://images.example.com/photo.png');
+
+        process.env.CLOUDINARY_CLOUD_NAME = 'test-cloud';
+        process.env.CLOUDINARY_API_KEY = 'test-key';
+        process.env.CLOUDINARY_API_SECRET = 'test-secret';
+        cloudinarySdk.uploader.upload = async (...args) => {
+            uploadArguments = args;
+            return { secure_url: cloudinaryUrl };
+        };
+
+        assert.equal(isCloudinaryConfigured(), true);
+        assert.equal(await uploadCandidatePhoto(photoDataUri), cloudinaryUrl);
+        assert.deepEqual(uploadArguments, [
+            photoDataUri,
+            {
+                folder: 'secure-voting/candidates',
+                resource_type: 'image',
+                transformation: [{
+                    width: 400,
+                    height: 400,
+                    crop: 'fill',
+                    gravity: 'face',
+                    quality: 'auto',
+                    fetch_format: 'auto'
+                }]
+            }
+        ]);
+    } finally {
+        cloudinarySdk.uploader.upload = originalUpload;
+        envNames.forEach(name => {
+            if (originalEnv[name] === undefined) delete process.env[name];
+            else process.env[name] = originalEnv[name];
+        });
+    }
+});
+
+test('adding a candidate stores the Cloudinary URL returned for its Base64 photo', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const photoDataUri = 'data:image/png;base64,dGVzdA==';
+    const cloudinaryUrl = 'https://res.cloudinary.com/example/image/upload/candidate.png';
+    let insertedValues;
+    let uploadedPhoto;
+    const fakePool = {
+        async query(sql, values) {
+            assert.match(sql, /^INSERT INTO candidates/);
+            insertedValues = values;
+            return {
+                rows: [{
+                    candidate_id: 8,
+                    poll_id: values[0],
+                    candidate_name: values[1],
+                    party: values[2],
+                    photo_url: values[3]
+                }]
+            };
+        }
+    };
+    const app = express();
+    app.use(express.json());
+    app.use('/api/candidates', candidatesRouter.createCandidatesRouter(
+        fakePool,
+        async () => {},
+        async photoUrl => {
+            uploadedPhoto = photoUrl;
+            return cloudinaryUrl;
+        }
+    ));
+    const baseUrl = await listen(t, app);
+    const adminToken = jwt.sign(
+        { user_id: 99, role: 'admin' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+
+    const response = await fetch(`${baseUrl}/api/candidates/add`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            name: 'Cloud Candidate',
+            party: 'Civic Party',
+            photo_url: photoDataUri
+        })
+    });
+
+    assert.equal(response.status, 201);
+    assert.equal(uploadedPhoto, photoDataUri);
+    assert.equal(insertedValues[3], cloudinaryUrl);
+    assert.equal((await response.json()).photo_url, cloudinaryUrl);
+});
+
+test('candidate photo upload failures return 502 without inserting a candidate', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    const originalConsoleError = console.error;
+    console.error = () => {};
+    t.after(() => {
+        console.error = originalConsoleError;
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    let insertAttempted = false;
+    const app = express();
+    app.use(express.json());
+    app.use('/api/candidates', candidatesRouter.createCandidatesRouter(
+        {
+            async query() {
+                insertAttempted = true;
+                return { rows: [] };
+            }
+        },
+        async () => {},
+        async () => {
+            throw new Error('Cloudinary unavailable');
+        }
+    ));
+    const baseUrl = await listen(t, app);
+    const adminToken = jwt.sign(
+        { user_id: 99, role: 'admin' },
+        process.env.JWT_SECRET,
+        { expiresIn: '2h' }
+    );
+
+    const response = await fetch(`${baseUrl}/api/candidates/add`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${adminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+            name: 'Cloud Candidate',
+            party: 'Civic Party',
+            photo_url: 'data:image/png;base64,dGVzdA=='
+        })
+    });
+
+    assert.equal(response.status, 502);
+    assert.deepEqual(await response.json(), {
+        error: 'Failed to upload candidate photo to cloud storage.'
+    });
+    assert.equal(insertAttempted, false);
 });
 
 test('poll APIs keep candidate counts, turnout, and the global chain independent across polls', async t => {
