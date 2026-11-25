@@ -303,6 +303,81 @@ test('face verification returns a short-lived single-use token without exposing 
     assert.equal(exposedEmbedding.status, 404);
 });
 
+test('password reset requires matching account details and face before updating and auditing', async t => {
+    const storedEmbedding = Array(192).fill(0);
+    let account = {
+        user_id: 7,
+        email: 'voter@example.com',
+        face_embedding: storedEmbedding
+    };
+    const calls = [];
+    const fakePool = {
+        async query(sql, params) {
+            calls.push({ sql, params });
+            if (sql.startsWith('SELECT user_id, email, face_embedding')) {
+                return { rows: account ? [{ ...account }] : [], rowCount: account ? 1 : 0 };
+            }
+            if (sql.startsWith('UPDATE public.users')) {
+                account.password_hash = params[0];
+                return { rows: [], rowCount: 1 };
+            }
+            if (sql.startsWith('INSERT INTO public.audit_logs')) {
+                return { rows: [], rowCount: 1 };
+            }
+            throw new Error(`Unexpected query: ${sql}`);
+        }
+    };
+    const app = express();
+    app.use(express.json());
+    app.use('/api/auth', authRouter.createAuthRouter(fakePool, createRateLimiters(config())));
+    app.use(notFound);
+    const baseUrl = await listen(t, app);
+    const reset = body => fetch(`${baseUrl}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+    });
+    const body = {
+        email: 'voter@example.com',
+        mobile_no: '1234567890',
+        face_embedding: storedEmbedding,
+        new_password: 'new-password'
+    };
+
+    const missingField = await reset({ ...body, new_password: undefined });
+    assert.equal(missingField.status, 400);
+    assert.equal(calls.length, 0);
+
+    account = null;
+    const accountNotFound = await reset(body);
+    assert.equal(accountNotFound.status, 404);
+    assert.deepEqual(await accountNotFound.json(), {
+        error: 'No account matches that email and mobile number'
+    });
+
+    account = { user_id: 7, email: 'voter@example.com', face_embedding: null };
+    const unregisteredFace = await reset(body);
+    assert.equal(unregisteredFace.status, 401);
+    assert.deepEqual(await unregisteredFace.json(), { error: 'Biometric face verification failed' });
+
+    account = { user_id: 7, email: 'voter@example.com', face_embedding: storedEmbedding };
+    const faceMismatch = await reset({ ...body, face_embedding: Array(192).fill(1) });
+    assert.equal(faceMismatch.status, 401);
+    assert.deepEqual(await faceMismatch.json(), { error: 'Biometric face verification failed' });
+
+    const successfulReset = await reset(body);
+    assert.equal(successfulReset.status, 200);
+    assert.deepEqual(await successfulReset.json(), { message: 'Password reset successfully' });
+    assert.match(account.password_hash, /^\$2[aby]\$10\$/);
+    assert.equal(await bcrypt.compare(body.new_password, account.password_hash), true);
+
+    const selectCall = calls.find(call => call.sql.startsWith('SELECT user_id, email, face_embedding'));
+    assert.equal(selectCall.sql.includes('email = $1 AND mobile_no = $2'), true);
+    assert.deepEqual(selectCall.params, [body.email, body.mobile_no]);
+    const auditCall = calls.find(call => call.sql.startsWith('INSERT INTO public.audit_logs'));
+    assert.equal(auditCall.params[2], 'PASSWORD_RESET_BIOMETRIC');
+});
+
 test('strict schemas validate candidate, vote, and receipt inputs', async t => {
     assert.deepEqual(voteSchema.parse({
         candidate_id: 3,

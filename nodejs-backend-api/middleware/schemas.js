@@ -34,6 +34,13 @@ const registerSchema = z.object({
     password
 }).strict();
 
+const resetPasswordSchema = z.object({
+    email,
+    mobile_no: z.string().trim().regex(/^\+?\d{10,15}$/),
+    face_embedding: z.array(z.number().finite()).length(192),
+    new_password: password
+}).strict();
+
 const candidateName = z.string().trim().min(2).max(60).regex(/^[a-zA-Z0-9 .\-()+]+$/);
 const party = z.string().trim().max(50).refine(value => value.length === 0 || value.length >= 2);
 function isImageDataUri(value) {
@@ -143,6 +150,7 @@ module.exports = {
     pollIdParamsSchema,
     receiptHashParamsSchema,
     registerSchema,
+    resetPasswordSchema,
     scheduleSchema,
     voterApprovalSchema,
     voterIdParamsSchema,

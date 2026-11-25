@@ -6,7 +6,12 @@ const verifyToken = require('../middleware/verifyToken');
 const rateLimiters = require('../middleware/rateLimits');
 const { setRateLimitResponse } = rateLimiters;
 const validate = require('../middleware/validate');
-const { faceEmbeddingSchema, loginSchema, registerSchema } = require('../middleware/schemas');
+const {
+    faceEmbeddingSchema,
+    loginSchema,
+    registerSchema,
+    resetPasswordSchema
+} = require('../middleware/schemas');
 const logError = require('../utils/logError');
 const { euclideanDistance, FACE_MATCH_THRESHOLD, parseStoredEmbedding } = require('../utils/faceEmbedding');
 const { issueVerificationToken } = require('../utils/verificationToken');
@@ -140,6 +145,43 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
             );
 
             res.json({ message: 'Login successful!', token: token, role: user.role });
+        } catch (err) {
+            next(err);
+        }
+    });
+
+    router.post('/reset-password', limits.loginIp, validate(resetPasswordSchema), async (req, res, next) => {
+        try {
+            const { email, mobile_no, face_embedding, new_password } = req.body;
+            const result = await pool.query(
+                'SELECT user_id, email, face_embedding FROM public.users WHERE email = $1 AND mobile_no = $2',
+                [email, mobile_no]
+            );
+            if (result.rows.length === 0) {
+                return res.status(404).json({ error: 'No account matches that email and mobile number' });
+            }
+
+            const user = result.rows[0];
+            if (user.face_embedding === null) {
+                return res.status(401).json({ error: 'Biometric face verification failed' });
+            }
+
+            const storedEmbedding = parseStoredEmbedding(user.face_embedding);
+            if (euclideanDistance(face_embedding, storedEmbedding) >= FACE_MATCH_THRESHOLD) {
+                return res.status(401).json({ error: 'Biometric face verification failed' });
+            }
+
+            const passwordHash = await bcrypt.hash(new_password, 10);
+            await pool.query(
+                'UPDATE public.users SET password_hash = $1 WHERE user_id = $2',
+                [passwordHash, user.user_id]
+            );
+            await pool.query(
+                'INSERT INTO public.audit_logs (admin_id, admin_email, action, target_details) VALUES ($1, $2, $3, $4)',
+                [user.user_id, user.email, 'PASSWORD_RESET_BIOMETRIC', JSON.stringify({ user_id: user.user_id })]
+            );
+
+            return res.status(200).json({ message: 'Password reset successfully' });
         } catch (err) {
             next(err);
         }
