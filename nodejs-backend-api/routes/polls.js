@@ -49,7 +49,7 @@ router.get('/', verifyToken, rateLimiters.voter, async (req, res, next) => {
 });
 
 // ROUTE 2: Create a new poll (Protected - Requires Token)
-router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(pollCreateSchema), async (req, res, next) => {
+router.post('/create', verifyToken, verifyAdmin(), rateLimiters.admin, validate(pollCreateSchema), async (req, res, next) => {
     try {
         const { title, description, start_time, end_time, is_private, security_code } = req.body;
         
@@ -69,7 +69,13 @@ router.post('/create', verifyToken, verifyAdmin, rateLimiters.admin, validate(po
 });
 
 // ROUTE: Get live results for a specific poll (Public or Protected)
-router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema, 'params'), async (req, res, next) => {
+router.get(
+    '/:poll_id/results',
+    verifyToken.optional,
+    verifyAdmin.checkSubAdminPermission('can_view_results'),
+    rateLimiters.public,
+    validate(pollIdParamsSchema, 'params'),
+    async (req, res, next) => {
     try {
         const { poll_id } = req.params;
 
@@ -85,7 +91,7 @@ router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema
             pool.query(`
                 SELECT
                     (SELECT COUNT(*) FROM voter_turnout WHERE poll_id = $1) AS total_votes_cast,
-                    (SELECT COUNT(*) FROM users WHERE role IS DISTINCT FROM 'admin' AND is_approved IS TRUE) AS approved_voters
+                    (SELECT COUNT(*) FROM users WHERE role = 'voter' AND is_approved IS TRUE) AS approved_voters
             `, [poll_id])
         ]);
         const totalVotesCast = Number(turnoutResult.rows[0].total_votes_cast);
@@ -95,7 +101,7 @@ router.get('/:poll_id/results', rateLimiters.public, validate(pollIdParamsSchema
             : Math.round((totalVotesCast / approvedVoters) * 1000) / 10;
 
         res.json({
-            poll_id: poll_id,
+            poll_id,
             results: results.rows,
             turnout: {
                 total_votes_cast: totalVotesCast,

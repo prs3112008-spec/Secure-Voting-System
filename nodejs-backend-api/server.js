@@ -31,6 +31,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/polls', require('./routes/polls'));
 app.use('/api/candidates', require('./routes/candidates'));
 app.use('/api/votes', require('./routes/votes'));
+app.use('/api/admin', require('./routes/admin'));
 
 // Test the connection
 pool.connect((err, client, release) => {
@@ -52,10 +53,10 @@ const {
 } = require('./middleware/schemas');
 
 // GET all voters for the Admin Dashboard
-app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res, next) => {
+app.get('/api/admin/voters', verifyToken, verifyAdmin('can_approve_voters'), rateLimiters.admin, async (req, res, next) => {
     try {
         const result = await pool.query(
-            "SELECT user_id, full_name, email, is_approved FROM users WHERE role IS DISTINCT FROM 'admin' ORDER BY created_at DESC"
+            "SELECT user_id, full_name, email, is_approved FROM users WHERE role = 'voter' ORDER BY created_at DESC"
         );
         res.json(result.rows);
     } catch (err) {
@@ -64,13 +65,13 @@ app.get('/api/admin/voters', verifyToken, verifyAdmin, rateLimiters.admin, async
 });
 
 // PUT toggle a voter's approval status
-app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res, next) => {
+app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin('can_approve_voters'), rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res, next) => {
     const { id } = req.params;
     const { is_approved } = req.body;
 
     try {
         const result = await pool.query(
-            'UPDATE users SET is_approved = $1 WHERE user_id = $2 RETURNING user_id, full_name, is_approved',
+            "UPDATE users SET is_approved = $1 WHERE user_id = $2 AND role = 'voter' RETURNING user_id, full_name, is_approved",
             [is_approved, id]
         );
         if (result.rows.length === 0) {
@@ -87,7 +88,7 @@ app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin, rateLimiters.
     }
 });
 
-app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res, next) => {
+app.get('/api/admin/audit-logs', verifyToken, verifyAdmin(), rateLimiters.admin, async (req, res, next) => {
     try {
         const result = await getLatestAuditLogs();
         res.json(result.rows);
@@ -96,7 +97,7 @@ app.get('/api/admin/audit-logs', verifyToken, verifyAdmin, rateLimiters.admin, a
     }
 });
 
-app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin, rateLimiters.admin, validate(optionalPollIdParamsSchema, 'params'), async (req, res, next) => {
+app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], verifyToken, verifyAdmin('can_export_csv'), rateLimiters.admin, validate(optionalPollIdParamsSchema, 'params'), async (req, res, next) => {
     try {
         const pollId = req.params.poll_id || '1';
         const pollResult = await pool.query(
@@ -112,7 +113,7 @@ app.get(['/api/admin/export-results', '/api/admin/export-results/:poll_id'], ver
             pool.query(`
                 SELECT
                     (SELECT COUNT(*) FROM voter_turnout WHERE poll_id = $1) AS total_votes_cast,
-                    (SELECT COUNT(*) FROM users WHERE role IS DISTINCT FROM 'admin' AND is_approved IS TRUE) AS approved_voters
+                    (SELECT COUNT(*) FROM users WHERE role = 'voter' AND is_approved IS TRUE) AS approved_voters
             `, [pollId]),
             pool.query(`
                 SELECT c.candidate_name, c.party, COUNT(v.vote_id) AS votes
@@ -229,11 +230,13 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-initializeAuditLogs()
+pool.query("ALTER TABLE public.users ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb")
+    .then(() => pool.query("UPDATE public.users SET role = 'super_admin' WHERE role = 'admin'"))
+    .then(() => initializeAuditLogs())
     .then(() => {
         server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
     })
     .catch(err => {
-        logError('Audit log table initialization failed', err);
+        logError('Database schema initialization failed', err);
         process.exit(1);
     });

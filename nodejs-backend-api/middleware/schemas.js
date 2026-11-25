@@ -131,6 +131,20 @@ const scheduleSchema = z.object({
 const voterApprovalSchema = z.object({
     is_approved: z.boolean()
 }).strict();
+const delegatedPermissionsSchema = z.object({
+    can_approve_voters: z.boolean().optional(),
+    can_view_results: z.boolean().optional(),
+    can_export_csv: z.boolean().optional()
+}).strict().transform(permissions => ({
+    can_approve_voters: permissions.can_approve_voters === true,
+    can_view_results: permissions.can_view_results === true,
+    can_export_csv: permissions.can_export_csv === true
+}));
+const delegateRoleSchema = z.object({
+    user_id: positiveId,
+    role: z.enum(['sub_admin', 'voter']),
+    permissions: delegatedPermissionsSchema
+}).strict();
 
 const receiptHashParamsSchema = z.object({
     hash: z.string().regex(/^[a-f0-9]{64}$/i)
@@ -143,6 +157,8 @@ const optionalPollIdParamsSchema = z.object({ poll_id: positiveId.optional() }).
 module.exports = {
     candidateIdParamsSchema,
     candidateSchema,
+    delegateRoleSchema,
+    delegatedPermissionsSchema,
     faceEmbeddingSchema,
     loginSchema,
     optionalPollIdParamsSchema,

@@ -7,10 +7,14 @@ CREATE TABLE IF NOT EXISTS users (
     mobile_no VARCHAR(16) NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL DEFAULT 'voter',
+    permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
     is_approved BOOLEAN NOT NULL DEFAULT FALSE,
     face_embedding JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE public.users ADD COLUMN IF NOT EXISTS permissions JSONB DEFAULT '{}'::jsonb;
+UPDATE public.users SET role = 'super_admin' WHERE role = 'admin';
 
 CREATE TABLE IF NOT EXISTS polls (
     poll_id SERIAL PRIMARY KEY,

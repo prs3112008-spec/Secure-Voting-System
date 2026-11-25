@@ -134,17 +134,19 @@ function createAuthRouter(pool = defaultPool, limits = rateLimiters) {
 
             loginBackoff.reset(req.loginAccountEmail);
 
-            if (user.role !== 'admin' && !user.is_approved) {
+            const role = user.role === 'admin' ? 'super_admin' : user.role;
+            if (role === 'voter' && !user.is_approved) {
                 return res.status(403).json({ error: 'Your account is pending Admin approval. Please wait for verification.' });
             }
 
+            const permissions = user.permissions || {};
             const token = jwt.sign(
-                { user_id: user.user_id, role: user.role },
+                { user_id: user.user_id, role, permissions },
                 process.env.JWT_SECRET,
                 { expiresIn: '2h' }
             );
 
-            res.json({ message: 'Login successful!', token: token, role: user.role });
+            res.json({ message: 'Login successful!', token, role, permissions });
         } catch (err) {
             next(err);
         }

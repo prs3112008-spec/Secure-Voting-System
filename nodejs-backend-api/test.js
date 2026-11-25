@@ -11,10 +11,12 @@ const helmet = require('helmet');
 const jwt = require('jsonwebtoken');
 const os = require('node:os');
 const path = require('node:path');
+const adminRouter = require('./routes/admin');
 const authRouter = require('./routes/auth');
 const candidatesRouter = require('./routes/candidates');
 const pollsRouter = require('./routes/polls');
 const votesRouter = require('./routes/votes');
+const verifyAdmin = require('./middleware/verifyAdmin');
 const { createRateLimiters, getRateLimitConfig } = require('./middleware/rateLimits');
 const { errorHandler, notFound } = require('./middleware/errorHandler');
 const { isCloudinaryConfigured, uploadCandidatePhoto } = require('./utils/cloudinary');
@@ -102,6 +104,212 @@ test('server exits before startup when required secrets are absent', () => {
     }
 });
 
+test('super admins can delegate and revoke sub-admin roles', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const calls = [];
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin', adminRouter.createAdminRouter({
+        async query(sql, values) {
+            calls.push({ sql, values });
+            return {
+                rows: [{
+                    user_id: values[2],
+                    full_name: 'Delegated User',
+                    email: 'delegated@example.com',
+                    role: values[0],
+                    permissions: JSON.parse(values[1])
+                }]
+            };
+        }
+    }, async (...args) => calls.push({ audit: args })));
+    const baseUrl = await listen(t, app);
+    const superAdminToken = jwt.sign(
+        { user_id: 99, role: 'super_admin', permissions: {} },
+        process.env.JWT_SECRET
+    );
+    const subAdminToken = jwt.sign(
+        { user_id: 7, role: 'sub_admin', permissions: { can_approve_voters: true } },
+        process.env.JWT_SECRET
+    );
+    const permissions = {
+        can_approve_voters: true,
+        can_view_results: false,
+        can_export_csv: true
+    };
+
+    const delegated = await fetch(`${baseUrl}/api/admin/delegate-role`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${superAdminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ user_id: 12, role: 'sub_admin', permissions })
+    });
+
+    assert.equal(delegated.status, 200);
+    assert.deepEqual((await delegated.json()).user.permissions, permissions);
+    assert.equal(calls[0].values[0], 'sub_admin');
+    assert.deepEqual(JSON.parse(calls[0].values[1]), permissions);
+    assert.equal(calls[1].audit[1], 'DELEGATE_SUB_ADMIN');
+
+    const revoked = await fetch(`${baseUrl}/api/admin/delegate-role`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${superAdminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ user_id: 12, role: 'voter', permissions })
+    });
+    assert.equal(revoked.status, 200);
+    assert.equal(calls[2].values[0], 'voter');
+    assert.deepEqual(JSON.parse(calls[2].values[1]), {
+        can_approve_voters: false,
+        can_view_results: false,
+        can_export_csv: false
+    });
+    assert.equal(calls[3].audit[1], 'REVOKE_SUB_ADMIN');
+
+    const unauthorized = await fetch(`${baseUrl}/api/admin/delegate-role`, {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${subAdminToken}`,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ user_id: 12, role: 'voter', permissions: {} })
+    });
+    assert.equal(unauthorized.status, 403);
+    assert.deepEqual(await unauthorized.json(), { error: 'Insufficient delegated permissions' });
+});
+
+test('sub-admin permissions allow delegated actions and block unauthorized admin routes', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const app = express();
+    app.use(express.json());
+    app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin('can_approve_voters'), (req, res) => {
+        res.sendStatus(204);
+    });
+    app.get('/api/admin/export-results', verifyToken, verifyAdmin('can_export_csv'), (req, res) => {
+        res.sendStatus(204);
+    });
+    app.use('/api/polls', pollsRouter.createPollsRouter({
+        async query(sql) {
+            if (sql.includes('SELECT c.candidate_id')) return { rows: [] };
+            return { rows: [{ total_votes_cast: '0', approved_voters: '0' }] };
+        }
+    }, async () => {}));
+    app.use('/api/candidates', candidatesRouter.createCandidatesRouter({
+        async query(sql) {
+            if (sql.includes('CAST(COUNT(v.vote_id) AS INTEGER)')) return { rows: [] };
+            throw new Error('Database should not be reached for unauthorized routes.');
+        }
+    }));
+    const baseUrl = await listen(t, app);
+    const subAdminToken = jwt.sign({
+        user_id: 7,
+        role: 'sub_admin',
+        permissions: {
+            can_approve_voters: true,
+            can_view_results: true,
+            can_export_csv: false
+        }
+    }, process.env.JWT_SECRET);
+    const headers = { Authorization: `Bearer ${subAdminToken}` };
+
+    const approval = await fetch(`${baseUrl}/api/admin/voters/12/approve`, {
+        method: 'PUT',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ is_approved: true })
+    });
+    assert.equal(approval.status, 204);
+
+    const results = await fetch(`${baseUrl}/api/polls/1/results`, { headers });
+    assert.equal(results.status, 200);
+
+    const candidates = await fetch(`${baseUrl}/api/candidates/1`, { headers });
+    assert.equal(candidates.status, 200);
+
+    const exportResults = await fetch(`${baseUrl}/api/admin/export-results`, { headers });
+    assert.equal(exportResults.status, 403);
+    assert.deepEqual(await exportResults.json(), { error: 'Insufficient delegated permissions' });
+
+    const exportAllowedToken = jwt.sign({
+        user_id: 8,
+        role: 'sub_admin',
+        permissions: { can_export_csv: true }
+    }, process.env.JWT_SECRET);
+    const exportAllowed = await fetch(`${baseUrl}/api/admin/export-results`, {
+        headers: { Authorization: `Bearer ${exportAllowedToken}` }
+    });
+    assert.equal(exportAllowed.status, 204);
+
+    const pollCreation = await fetch(`${baseUrl}/api/polls/create`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            title: 'Forbidden Poll',
+            start_time: new Date(Date.now() - 60_000).toISOString(),
+            end_time: new Date(Date.now() + 60_000).toISOString()
+        })
+    });
+    assert.equal(pollCreation.status, 403);
+    assert.deepEqual(await pollCreation.json(), { error: 'Insufficient delegated permissions' });
+
+    const candidateAddition = await fetch(`${baseUrl}/api/candidates/add`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            name: 'Blocked Candidate',
+            photo_url: 'https://images.example.com/candidate.png'
+        })
+    });
+    assert.equal(candidateAddition.status, 403);
+    assert.deepEqual(await candidateAddition.json(), { error: 'Insufficient delegated permissions' });
+
+    const candidateDeletion = await fetch(`${baseUrl}/api/candidates/1`, {
+        method: 'DELETE',
+        headers
+    });
+    assert.equal(candidateDeletion.status, 403);
+    assert.deepEqual(await candidateDeletion.json(), { error: 'Insufficient delegated permissions' });
+
+    const forbiddenResults = await fetch(`${baseUrl}/api/polls/1/results`, {
+        headers: {
+            Authorization: `Bearer ${jwt.sign({
+                user_id: 8,
+                role: 'sub_admin',
+                permissions: {}
+            }, process.env.JWT_SECRET)}`
+        }
+    });
+    assert.equal(forbiddenResults.status, 403);
+    assert.deepEqual(await forbiddenResults.json(), { error: 'Insufficient delegated permissions' });
+
+    const forbiddenCandidates = await fetch(`${baseUrl}/api/candidates/1`, {
+        headers: {
+            Authorization: `Bearer ${jwt.sign({
+                user_id: 8,
+                role: 'sub_admin',
+                permissions: {}
+            }, process.env.JWT_SECRET)}`
+        }
+    });
+    assert.equal(forbiddenCandidates.status, 403);
+    assert.deepEqual(await forbiddenCandidates.json(), { error: 'Insufficient delegated permissions' });
+});
+
 test('unexpected errors, malformed JSON, and unknown routes return safe JSON', async t => {
     const loggedErrors = [];
     const originalConsoleError = console.error;
@@ -172,6 +380,11 @@ test('failed logins back off by account and successful login resets the backoff'
                     email: 'voter@example.com',
                     password_hash: passwordHash,
                     role: 'voter',
+                    permissions: {
+                        can_approve_voters: false,
+                        can_view_results: false,
+                        can_export_csv: false
+                    },
                     is_approved: true
                 }]
             };
@@ -223,13 +436,65 @@ test('failed logins back off by account and successful login resets the backoff'
     assert.equal(exponentialBackoff.headers.get('retry-after'), '2');
 
     await new Promise(resolve => setTimeout(resolve, 2050));
-    assert.equal((await login('correct-password')).status, 200);
+    const successfulLogin = await login('correct-password');
+    assert.equal(successfulLogin.status, 200);
+    const loginBody = await successfulLogin.json();
+    assert.equal(loginBody.role, 'voter');
+    assert.deepEqual(loginBody.permissions, {
+        can_approve_voters: false,
+        can_view_results: false,
+        can_export_csv: false
+    });
+    assert.equal(jwt.verify(loginBody.token, process.env.JWT_SECRET).role, 'voter');
+    assert.deepEqual(jwt.verify(loginBody.token, process.env.JWT_SECRET).permissions, loginBody.permissions);
 
     assert.equal((await login('wrongpass')).status, 401);
     assert.equal((await login('wrongpass')).status, 401);
     const afterReset = await login('wrongpass');
     assert.equal(afterReset.status, 429);
     assert.equal(afterReset.headers.get('retry-after'), '1');
+});
+
+test('legacy admin logins are represented as super_admin with permissions in the token', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const permissions = { can_approve_voters: true, can_view_results: true, can_export_csv: true };
+    const passwordHash = await bcrypt.hash('correct-password', 4);
+    const app = express();
+    app.use(express.json());
+    app.use('/api/auth', authRouter.createAuthRouter({
+        async query() {
+            return {
+                rows: [{
+                    user_id: 99,
+                    email: 'admin@example.com',
+                    password_hash: passwordHash,
+                    role: 'admin',
+                    permissions,
+                    is_approved: false
+                }]
+            };
+        }
+    }, createRateLimiters(config())));
+    const baseUrl = await listen(t, app);
+    const response = await fetch(`${baseUrl}/api/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'admin@example.com', password: 'correct-password' })
+    });
+
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.role, 'super_admin');
+    assert.deepEqual(body.permissions, permissions);
+    const tokenPayload = jwt.verify(body.token, process.env.JWT_SECRET);
+    assert.equal(tokenPayload.role, 'super_admin');
+    assert.deepEqual(tokenPayload.permissions, permissions);
 });
 
 test('face-enrollment tokens are rejected by normal protected routes', async t => {
@@ -1284,7 +1549,7 @@ test('poll APIs keep candidate counts, turnout, and the global chain independent
                     rows: [{
                         total_votes_cast: String(state.turnout.filter(row => row.poll_id === pollId).length),
                         approved_voters: String(state.users.filter(user =>
-                            user.role !== 'admin' && user.is_approved === true
+                            user.role === 'voter' && user.is_approved === true
                         ).length)
                     }]
                 };
