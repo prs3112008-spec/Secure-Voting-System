@@ -18,6 +18,15 @@ app.use((req, res, next) => {
     console.log(`${req.method} request`);
     next();
 });
+app.get('/api/health', async (req, res) => {
+    try {
+        await pool.query('SELECT 1');
+        res.json({ status: 'ok', db: 'connected', uptime: process.uptime() });
+    } catch (err) {
+        logError('Health check database query failed', err);
+        res.status(503).json({ status: 'error', db: 'disconnected' });
+    }
+});
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/polls', require('./routes/polls'));
 app.use('/api/candidates', require('./routes/candidates'));
@@ -178,8 +187,52 @@ const PORT = process.env.PORT || 5000;
 app.use(notFound);
 app.use(errorHandler);
 
+let server;
+let shuttingDown = false;
+
+function shutdown(signal) {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}; shutting down gracefully`);
+
+    const forceExitTimer = setTimeout(() => {
+        logError('Graceful shutdown timed out', new Error('Shutdown exceeded 10 seconds'));
+        process.exit(1);
+    }, 10000);
+    forceExitTimer.unref();
+
+    (async () => {
+        let shutdownError;
+        if (server) {
+            try {
+                await new Promise((resolve, reject) => {
+                    server.close(err => err ? reject(err) : resolve());
+                });
+            } catch (err) {
+                shutdownError = err;
+                logError('HTTP server shutdown failed', err);
+            }
+        }
+
+        try {
+            await pool.end();
+        } catch (err) {
+            shutdownError = err;
+            logError('Database pool shutdown failed', err);
+        }
+
+        clearTimeout(forceExitTimer);
+        process.exit(shutdownError ? 1 : 0);
+    })();
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
 initializeAuditLogs()
-    .then(() => app.listen(PORT, () => console.log(`Server running on port ${PORT}`)))
+    .then(() => {
+        server = app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    })
     .catch(err => {
         logError('Audit log table initialization failed', err);
         process.exit(1);
