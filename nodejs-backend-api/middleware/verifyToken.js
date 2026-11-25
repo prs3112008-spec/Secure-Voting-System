@@ -23,5 +23,9 @@ function createVerifyToken(allowFaceEnroll = false) {
 
 const verifyToken = createVerifyToken();
 verifyToken.allowFaceEnroll = createVerifyToken(true);
+verifyToken.optional = function (req, res, next) {
+    if (!req.header('Authorization')) return next();
+    return verifyToken(req, res, next);
+};
 
 module.exports = verifyToken;
