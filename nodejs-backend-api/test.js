@@ -113,10 +113,38 @@ test('super admins can delegate and revoke sub-admin roles', async t => {
     });
 
     const calls = [];
+    let voterListSql;
     const app = express();
     app.use(express.json());
     app.use('/api/admin', adminRouter.createAdminRouter({
         async query(sql, values) {
+            if (sql.includes("role IN ('voter', 'sub_admin')")) {
+                voterListSql = sql;
+                return {
+                    rows: [
+                        {
+                            user_id: 12,
+                            full_name: 'Delegated User',
+                            email: 'delegated@example.com',
+                            is_approved: true,
+                            role: 'sub_admin',
+                            permissions: {
+                                can_approve_voters: true,
+                                can_view_results: false,
+                                can_export_csv: true
+                            }
+                        },
+                        {
+                            user_id: 13,
+                            full_name: 'Regular User',
+                            email: 'regular@example.com',
+                            is_approved: false,
+                            role: 'voter',
+                            permissions: {}
+                        }
+                    ]
+                };
+            }
             calls.push({ sql, values });
             return {
                 rows: [{
@@ -143,6 +171,31 @@ test('super admins can delegate and revoke sub-admin roles', async t => {
         can_view_results: false,
         can_export_csv: true
     };
+
+    const voters = await fetch(`${baseUrl}/api/admin/voters`, {
+        headers: { Authorization: `Bearer ${superAdminToken}` }
+    });
+    assert.equal(voters.status, 200);
+    assert.deepEqual(await voters.json(), [
+        {
+            user_id: 12,
+            full_name: 'Delegated User',
+            email: 'delegated@example.com',
+            is_approved: true,
+            role: 'sub_admin',
+            permissions
+        },
+        {
+            user_id: 13,
+            full_name: 'Regular User',
+            email: 'regular@example.com',
+            is_approved: false,
+            role: 'voter',
+            permissions: {}
+        }
+    ]);
+    assert.match(voterListSql, /role IN \('voter', 'sub_admin'\)/);
+    assert.match(voterListSql, /role, permissions/);
 
     const delegated = await fetch(`${baseUrl}/api/admin/delegate-role`, {
         method: 'POST',

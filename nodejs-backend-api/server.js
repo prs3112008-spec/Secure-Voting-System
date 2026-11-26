@@ -52,18 +52,6 @@ const {
     voterIdParamsSchema
 } = require('./middleware/schemas');
 
-// GET all voters for the Admin Dashboard
-app.get('/api/admin/voters', verifyToken, verifyAdmin('can_approve_voters'), rateLimiters.admin, async (req, res, next) => {
-    try {
-        const result = await pool.query(
-            "SELECT user_id, full_name, email, is_approved FROM users WHERE role = 'voter' ORDER BY created_at DESC"
-        );
-        res.json(result.rows);
-    } catch (err) {
-        next(err);
-    }
-});
-
 // PUT toggle a voter's approval status
 app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin('can_approve_voters'), rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res, next) => {
     const { id } = req.params;

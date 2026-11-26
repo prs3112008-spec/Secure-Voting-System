@@ -2,12 +2,24 @@ const express = require('express');
 const sharedPool = require('../db/pool');
 const verifyToken = require('../middleware/verifyToken');
 const verifyAdmin = require('../middleware/verifyAdmin');
+const rateLimiters = require('../middleware/rateLimits');
 const validate = require('../middleware/validate');
 const { delegateRoleSchema } = require('../middleware/schemas');
 const { logAdminAction } = require('../utils/auditLog');
 
 function createAdminRouter(pool = sharedPool, logAction = logAdminAction) {
     const router = express.Router();
+
+    router.get('/voters', verifyToken, verifyAdmin('can_approve_voters'), rateLimiters.admin, async (req, res, next) => {
+        try {
+            const result = await pool.query(
+                "SELECT user_id, full_name, email, is_approved, role, permissions FROM public.users WHERE role IN ('voter', 'sub_admin') ORDER BY created_at DESC"
+            );
+            res.json(result.rows);
+        } catch (err) {
+            next(err);
+        }
+    });
 
     router.post('/delegate-role', verifyToken, verifyAdmin(), validate(delegateRoleSchema), async (req, res, next) => {
         const { user_id, role, permissions } = req.body;
