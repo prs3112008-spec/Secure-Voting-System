@@ -250,7 +250,7 @@ router.get('/election-status/:poll_id', rateLimiters.public, validate(pollIdPara
 });
 
 // ROUTE: Update an election schedule (Admin only)
-router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, validate(scheduleSchema), async (req, res, next) => {
+router.post('/update-schedule', verifyToken, verifyAdmin(), rateLimiters.admin, validate(scheduleSchema), async (req, res, next) => {
     try {
         const { poll_id, start_time, end_time, is_active } = req.body;
 
@@ -291,7 +291,7 @@ router.post('/update-schedule', verifyToken, verifyAdmin, rateLimiters.admin, va
 });
 
 // ROUTE: Verify the integrity of the vote chain
-router.get('/verify-chain', verifyToken, verifyAdmin, rateLimiters.admin, async (req, res, next) => {
+router.get('/verify-chain', verifyToken, verifyAdmin(), rateLimiters.admin, async (req, res, next) => {
     try {
         const chainStatus = await verifyVoteChain(pool);
         delete chainStatus.verified_blocks;

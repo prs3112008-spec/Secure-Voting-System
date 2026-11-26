@@ -13,7 +13,7 @@ function createCandidatesRouter(pool = sharedPool, logAction = logAdminAction, u
 const router = express.Router();
 
 // ROUTE 1: Add a new candidate to a poll (Protected - Admins Only)
-router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateSchema), async (req, res, next) => {
+router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin(), rateLimiters.admin, validate(candidateSchema), async (req, res, next) => {
     try {
         const { poll_id, name, party, photo_url } = req.body;
         let storedPhotoUrl;
@@ -42,7 +42,7 @@ router.post(['/add', '/add-candidate'], verifyToken, verifyAdmin, rateLimiters.a
 });
 
 // ROUTE 2: Delete a candidate only when it has no votes (Protected - Admins Only)
-router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, validate(candidateIdParamsSchema, 'params'), async (req, res, next) => {
+router.delete('/:candidate_id', verifyToken, verifyAdmin(), rateLimiters.admin, validate(candidateIdParamsSchema, 'params'), async (req, res, next) => {
     let client;
     let transactionOpen = false;
 
@@ -102,7 +102,13 @@ router.delete('/:candidate_id', verifyToken, verifyAdmin, rateLimiters.admin, va
 });
 
 // ROUTE 3: Get all candidates for a specific poll (Protected - Any Logged-in Voter)
-router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSchema, 'params'), async (req, res, next) => {
+router.get(
+    '/:poll_id',
+    verifyToken,
+    verifyAdmin.checkSubAdminPermission('can_view_results'),
+    rateLimiters.voter,
+    validate(pollIdParamsSchema, 'params'),
+    async (req, res, next) => {
     try {
         const { poll_id } = req.params;
 
@@ -121,7 +127,8 @@ router.get('/:poll_id', verifyToken, rateLimiters.voter, validate(pollIdParamsSc
     } catch (err) {
         next(err);
     }
-});
+    }
+);
 
 return router;
 }
