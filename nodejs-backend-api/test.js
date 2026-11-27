@@ -241,6 +241,68 @@ test('super admins can delegate and revoke sub-admin roles', async t => {
     assert.deepEqual(await unauthorized.json(), { error: 'Insufficient delegated permissions' });
 });
 
+test('super admins can revoke sub-admin approval but cannot revoke their own', async t => {
+    const originalSecret = process.env.JWT_SECRET;
+    process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');
+    t.after(() => {
+        if (originalSecret === undefined) delete process.env.JWT_SECRET;
+        else process.env.JWT_SECRET = originalSecret;
+    });
+
+    const queries = [];
+    const auditEntries = [];
+    const app = express();
+    app.use(express.json());
+    app.use('/api/admin', adminRouter.createAdminRouter({
+        async query(sql, values) {
+            queries.push({ sql, values });
+            if (values[1] === 12) {
+                return {
+                    rows: [{ user_id: 12, full_name: 'Sub Admin', is_approved: values[0] }]
+                };
+            }
+            return { rows: [] };
+        }
+    }, async (...entry) => auditEntries.push(entry)));
+    const baseUrl = await listen(t, app);
+    const superAdminToken = jwt.sign(
+        { user_id: 99, role: 'super_admin', permissions: {} },
+        process.env.JWT_SECRET
+    );
+    const headers = {
+        Authorization: `Bearer ${superAdminToken}`,
+        'Content-Type': 'application/json'
+    };
+
+    const revoked = await fetch(`${baseUrl}/api/admin/voters/12/approve`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ is_approved: false })
+    });
+    assert.equal(revoked.status, 200);
+    assert.deepEqual((await revoked.json()).voter, {
+        user_id: 12,
+        full_name: 'Sub Admin',
+        is_approved: false
+    });
+    assert.match(queries[0].sql, /AND role != 'super_admin'/);
+    assert.deepEqual(queries[0].values, [false, 12]);
+    assert.equal(auditEntries[0][1], 'REVOKE_VOTER');
+    assert.deepEqual(JSON.parse(auditEntries[0][2]), {
+        user_id: 12,
+        is_approved: false
+    });
+
+    const selfRevocation = await fetch(`${baseUrl}/api/admin/voters/99/approve`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ is_approved: false })
+    });
+    assert.equal(selfRevocation.status, 404);
+    assert.equal(auditEntries.length, 1);
+    assert.deepEqual(queries[1].values, [false, 99]);
+});
+
 test('sub-admin permissions allow delegated actions and block unauthorized admin routes', async t => {
     const originalSecret = process.env.JWT_SECRET;
     process.env.JWT_SECRET = crypto.randomBytes(32).toString('hex');

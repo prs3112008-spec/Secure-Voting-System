@@ -47,34 +47,8 @@ const verifyAdmin = require('./middleware/verifyAdmin');
 const rateLimiters = require('./middleware/rateLimits');
 const validate = require('./middleware/validate');
 const {
-    optionalPollIdParamsSchema,
-    voterApprovalSchema,
-    voterIdParamsSchema
+    optionalPollIdParamsSchema
 } = require('./middleware/schemas');
-
-// PUT toggle a voter's approval status
-app.put('/api/admin/voters/:id/approve', verifyToken, verifyAdmin('can_approve_voters'), rateLimiters.admin, validate(voterIdParamsSchema, 'params'), validate(voterApprovalSchema), async (req, res, next) => {
-    const { id } = req.params;
-    const { is_approved } = req.body;
-
-    try {
-        const result = await pool.query(
-            "UPDATE users SET is_approved = $1 WHERE user_id = $2 AND role = 'voter' RETURNING user_id, full_name, is_approved",
-            [is_approved, id]
-        );
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Voter not found.' });
-        }
-        await logAdminAction(
-            req.user,
-            is_approved ? 'APPROVE_VOTER' : 'REVOKE_VOTER',
-            JSON.stringify({ voter_id: result.rows[0].user_id, is_approved })
-        );
-        res.json({ message: 'Voter approval updated.', voter: result.rows[0] });
-    } catch (err) {
-        next(err);
-    }
-});
 
 app.get('/api/admin/audit-logs', verifyToken, verifyAdmin(), rateLimiters.admin, async (req, res, next) => {
     try {
