@@ -1,43 +1,73 @@
-# Secure Voting System - Backend API
+# Secure Voting System — Backend API
 
-Backend REST API for my Secure Voting Android app, built with **Node.js, Express, and PostgreSQL (Supabase)**.
+REST API for the Secure Voting Android client, built with **Node.js, Express, and PostgreSQL (Supabase)**.
 
-I built this to solve the core problems in digital voting: keeping ballots anonymous, stopping double-voting under simultaneous requests, catching manual database tampering, and preventing users from bypassing face verification on the phone.
-
-**Android App Repo:** [Secure-Voting-System- (Android Java Client)](https://github.com/prs3112008-spec/Secure-Voting-System-)
+**Android Client Repository:** [Secure-Voting-System- (Android Java Client)](https://github.com/prs3112008-spec/Secure-Voting-System-)
 
 ---
 
-## How the Security Works
+## Architecture & Security Controls
 
-- **Tamper-Evident Vote Ledger (SHA-256):** Every vote stores a SHA-256 hash built from its own data plus the previous vote's hash. If someone alters or deletes a row directly in the database, the chain breaks and the admin verification endpoint flags it immediately.
-- **Anonymous Ballots + No Double-Voting:** Instead of storing `voter_id` on the vote itself, turnout is tracked separately in a `voter_turnout` table with a composite primary key `(poll_id, voter_id)` inside serialized transactions. The `votes` table holds zero voter info, and parallel duplicate requests get blocked with a `409 Conflict`.
-- **Server-Side Biometric Checks:** The Android app sends 192-float MobileFaceNet face embeddings to the backend rather than doing a local pass/fail check. The server compares them and issues a short-lived, single-use token tied to that specific user, blocking client-side bypasses and token replay.
-- **Admin Roles & Audit Logs:** Supports a main `super_admin` and delegated `sub_admin` accounts with specific permissions (`can_manage_polls`, `can_manage_candidates`, `can_approve_voters`). Every sensitive admin action writes to an audit log.
-- **API Hardening:** Uses **Zod** to strictly validate incoming params and request bodies, tiered rate limiting, exponential backoff on failed logins, **Helmet** headers, and Cloudinary for candidate photos.
+- **Hash-Chained Ballot Ledger (`votes`):** Each cast ballot stores a SHA-256 `current_hash` computed over its payload and the preceding row's `previous_hash`, returning a 64-character receipt hash to the voter. The admin verification endpoint recomputes the chain from the genesis record to flag modified payloads, broken links, or missing sequence links.
+- **Turnout & Ballot Separation (`voter_turnout` vs. `votes`):** Voter participation is recorded in `voter_turnout` with a composite primary key `(poll_id, voter_id)` inside serialized database transactions, while the `votes` table omits `voter_id` to separate identity from ballot choice. Concurrent duplicate requests trigger unique constraint violations mapped to HTTP `409 Conflict`.
+- **Server-Verified Biometric Tokens:** The Android client extracts 192-float MobileFaceNet embeddings and sends them over HTTPS to the backend, which compares them against stored embeddings and issues a short-lived, single-use, user-bound `verification_token` required by `POST /api/votes` (preventing client-side boolean bypasses and cross-user token replay).
+- **RBAC & Application Audit Logging:** Supports `super_admin` and delegated `sub_admin` permissions (`can_manage_polls`, `can_manage_candidates`, `can_approve_voters`). Privileged API actions (role changes, voter approvals, password resets, candidate edits) are written to `audit_logs`.
+- **API Hardening:** Strict **Zod** schema validation (`middleware/validate.js`), tiered rate limiting, exponential account login backoff, **Helmet** security headers, and Cloudinary image uploads.
 
 ---
 
-## Automated Security Tests (`node --test`)
+## Threat Model & Known Limitations
 
-Includes **37 integration and security tests** written with Node's built-in test runner to test common attack scenarios:
-- Firing parallel vote bursts to test double-voting race conditions (`409 Conflict`)
-- Modifying vote rows in the database to verify SHA-256 chain tamper detection
-- Replaying another user's biometric token or accessing other users' resources (IDOR)
-- Sending extra fields during registration to test mass assignment protection
-- Trying restricted admin endpoints as a sub-admin without permissions
-- Rate-limit abuse, malformed JSON payloads, and missing environment secrets at startup
+To keep security claims accurate, the following boundaries apply to the current architecture:
 
-### Run Locally
+- **Database-Resident Hash Chain:** Because hashes are stored in PostgreSQL without an external timestamping authority, append-only WORM storage, or HMAC/asymmetric signing key outside the database, a privileged attacker with full write access to PostgreSQL could recompute downstream hashes after modifying or deleting rows. Voters can independently verify their own receipt hash against the chain, but full tamper-resistance requires external hash anchoring.
+- **Pseudonymity vs. Strict Anonymity:** Omitting `voter_id` from `votes` prevents direct foreign-key lookups, but the system does not provide cryptographic unlinkability (such as blind signatures or mixnets). Server access logs, request timestamps, or low-turnout timing correlation could still narrow down ballot attribution.
+- **Biometric Liveness & Storage:** Facial embeddings are transmitted over HTTPS and verified server-side, but the current flow does not enforce active challenge-response liveness detection (e.g., blink/head-turn challenges) or hardware attestation against high-resolution replay attacks.
+- **Audit Log Scope:** Application-level audit logs capture API-driven admin actions, not direct out-of-band SQL edits executed via the Supabase dashboard.
 
-```bash
+---
+
+## Automated Security Test Suite (`node --test`)
+
+All **37 tests** live in [`nodejs-backend-api/test.js`](nodejs-backend-api/test.js) and [`nodejs-backend-api/tests/`](nodejs-backend-api/tests/) and run via Node's built-in test runner (`node --test`) without requiring a live production database:
+
+- **Startup & Secret Validation (3 tests):** Verifies the server exits non-zero when `DATABASE_URL` or `JWT_SECRET` is missing, never logs secret values, and attaches Helmet headers without breaking CORS.
+- **Authentication, RBAC & IDOR Protection (11 tests):** Tests `super_admin` / `sub_admin` delegation, self-revocation blocking, account login backoff, wrong-secret JWT rejection, mass-assignment rejection on registration, and user-scoped vote status.
+- **Biometric & Token Replay Controls (5 tests):** Verifies enrollment tokens cannot access protected routes, verification tokens are single-use and bound to the authenticated `user_id`, and password resets require matching account + face verification.
+- **Vote Concurrency, Anonymity & Ledger Integrity (11 tests):** Tests parallel vote bursts (1 accepted, duplicates rejected with `409 Conflict`), `voter_turnout` repeat-vote blocking, ballot schema isolation from `voter_id`, cross-poll chain isolation, and tampered ballot payload detection.
+- **Validation, Rate Limiting & Media Uploads (7 tests):** Tests Zod schema enforcement, tiered rate-limit thresholds, environment overrides, and Cloudinary failure rollback (`502` without orphaned candidate inserts).
+
+---
+
+## Local Setup & Prerequisites
+
+- **Runtime:** Node.js `v20+` (required for native `node --test` runner)
+- **Database:** PostgreSQL `15+` (or a Supabase project)
+
+### 1. Configure Environment Variables
+Copy `nodejs-backend-api/.env.example` to `nodejs-backend-api/.env` and set:
+```env
+DATABASE_URL=postgresql://user:password@host:5432/dbname
+JWT_SECRET=your-64-char-random-hex-secret
+PORT=5000
+# Optional (required only if testing Cloudinary photo uploads)
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_api_key
+CLOUDINARY_API_SECRET=your_api_secret
+2. Initialize Schema & Run
 cd nodejs-backend-api
 npm install
-npm start
 
-# Run all 37 automated security tests
+# Apply database schema to your PostgreSQL instance
+psql "$DATABASE_URL" -f schema.sql
+
+# Run the 37 automated security tests
 node --test
-##Runtime & Framework: Node.js, Express.js
+
+# Start the API server
+npm start
+##Tech Stack
+Runtime & Framework: Node.js, Express.js
 
 Database: PostgreSQL (Supabase)
 
