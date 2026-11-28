@@ -37,3 +37,10 @@ npm start
 
 # Run all 37 automated security tests
 node --test
+##Runtime & Framework: Node.js, Express.js
+
+Database: PostgreSQL (Supabase)
+
+Security & Validation: jsonwebtoken, zod, helmet, express-rate-limit, Node crypto (SHA-256)
+
+Media & Hosting: Cloudinary, Render
